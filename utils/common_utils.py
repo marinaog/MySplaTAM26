@@ -5,6 +5,15 @@ import random
 import torch
 
 
+def get_unique_output_dir(base_dir):
+    output_dir = base_dir
+    version = 2
+    while os.path.exists(output_dir):
+        output_dir = f"{base_dir}_{version}"
+        version += 1
+    return output_dir
+
+
 def seed_everything(seed=42):
     """
         Set the `seed` value for torch and numpy seeds. Also turns on

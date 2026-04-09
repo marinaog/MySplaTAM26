@@ -125,15 +125,13 @@ if __name__=="__main__":
     else:
         eval_dir = os.path.join(results_dir, "eval_nvs")
         wandb_name = config['wandb']['name'] + "_NVS_Split"
-    
+
     # Init WandB
     if config['use_wandb']:
         wandb_time_step = 0
         wandb_tracking_step = 0
         wandb_mapping_step = 0
         wandb_run = wandb.init(project=config['wandb']['project'],
-                               entity=config['wandb']['entity'],
-                               group=config['wandb']['group'],
                                name=wandb_name,
                                config=config)
 
@@ -159,7 +157,7 @@ if __name__=="__main__":
                 eval_nvs(dataset, params, num_frames, eval_dir, sil_thres=config['mapping']['sil_thres'],
                     mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],
                     eval_every=config['eval_every'], save_frames=True)
-    
+
     # Close WandB
     if config['use_wandb']:
         wandb_run.finish()

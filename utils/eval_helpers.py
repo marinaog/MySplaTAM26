@@ -605,6 +605,7 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
     np.savetxt(os.path.join(eval_dir, "l1.txt"), l1_list)
     np.savetxt(os.path.join(eval_dir, "ssim.txt"), ssim_list)
     np.savetxt(os.path.join(eval_dir, "lpips.txt"), lpips_list)
+    np.savetxt(os.path.join(eval_dir, "ATE_RMSE.txt"), np.array([ate_rmse]))
 
     # Plot PSNR & L1 as line plots
     fig, axs = plt.subplots(1, 2, figsize=(12, 4))
