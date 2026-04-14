@@ -30,7 +30,7 @@ from utils.common_utils import (
     save_params_ckpt,
     seed_everything,
 )
-from utils.eval_helpers import report_loss, report_progress, eval
+from utils.eval_helpers import report_loss, report_progress, eval, log_tracking_ate_history
 from utils.keyframe_selection import keyframe_selection_overlap
 from utils.recon_helpers import setup_camera
 from utils.slam_helpers import (
@@ -484,6 +484,11 @@ def rgbd_slam(config: dict):
         wandb_run = wandb.init(project=config['wandb']['project'],
                                name=config['wandb']['name'],
                                config=config)
+        wandb_run.define_metric("Trajectory/Frame")
+        wandb_run.define_metric("Trajectory/ATE RMSE vs Frame", step_metric="Trajectory/Frame")
+        if config['wandb'].get('log_ate_tracking_iterations', False):
+            wandb_run.define_metric("Trajectory/Tracking Iteration")
+            wandb_run.define_metric("Trajectory/ATE RMSE vs Tracking Iteration", step_metric="Trajectory/Tracking Iteration")
 
     # Get Device
     device = torch.device(config["primary_device"])
@@ -709,6 +714,14 @@ def rgbd_slam(config: dict):
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
                 with torch.no_grad():
+                    if config['use_wandb'] and config['wandb'].get('log_ate_tracking_iterations', False):
+                        log_tracking_ate_history(
+                            wandb_run,
+                            params,
+                            tracking_curr_data['iter_gt_w2c_list'],
+                            time_idx,
+                            tracking_iteration=wandb_tracking_step,
+                        )
                     # Save the best candidate rotation & translation
                     if loss < current_min_loss:
                         current_min_loss = loss
@@ -761,6 +774,14 @@ def rgbd_slam(config: dict):
         tracking_end_time = time.time()
         tracking_frame_time_sum += tracking_end_time - tracking_start_time
         tracking_frame_time_count += 1
+        if config['use_wandb']:
+            log_tracking_ate_history(
+                wandb_run,
+                params,
+                tracking_curr_data['iter_gt_w2c_list'],
+                time_idx,
+                frame_idx=time_idx,
+            )
 
         if time_idx == 0 or (time_idx+1) % config['report_global_progress_every'] == 0:
             try:

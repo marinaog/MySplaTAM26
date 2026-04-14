@@ -4,13 +4,13 @@ from os.path import join as p_join
 primary_device = "cuda:0"
 
 seed = int(0)
-scene_name = "candles"
+scene_name = "bottles"
 
 map_every = 1
 keyframe_every = 5
-mapping_window_size = 20
-tracking_iters = 200
-mapping_iters = 30
+mapping_window_size = 10
+tracking_iters = 100
+mapping_iters = 15
 scene_radius_depth_ratio = 2
 
 group_name = "rawslam"
@@ -40,6 +40,7 @@ config = dict(
         name=run_name,
         save_qual=False,
         eval_save_qual=True,
+        log_ate_tracking_iterations=False,
     ),
     data=dict(
         basedir="./data/rawslam",
