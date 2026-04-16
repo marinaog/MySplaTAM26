@@ -20,6 +20,44 @@ from pytorch_msssim import ms_ssim
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 loss_fn_alex = LearnedPerceptualImagePatchSimilarity(net_type='alex', normalize=True).cuda()
 
+
+def raw2normal(img, is_torch=False, bright_factor=None):
+    """Auto-expose and sRGB-gamma-correct a linear HDR image to [0, 1] LDR.
+
+    Pass ``bright_factor`` (computed from the GT image) to both pred and GT so
+    they share the same exposure when computing comparison metrics.
+    If omitted, the factor is derived from ``img`` itself (auto-exposure).
+    """
+    if is_torch:
+        if bright_factor is None:
+            bright_factor = 0.98 / torch.quantile(img, 0.99)
+        img = torch.clamp(img * bright_factor, 0.0, 1.0)
+
+        gamma = 2.4
+        slope = 12.92
+        threshold = 0.04045 / slope
+
+        out = torch.zeros_like(img)
+        low = img <= threshold
+        high = img > threshold
+
+        out[low] = img[low] * slope
+        out[high] = 1.055 * torch.pow(img[high], 1.0 / gamma) - 0.055
+
+    else:
+        bright_factor = 0.98 / (np.percentile(img, 99) + 1e-6)
+        img = np.clip(img * bright_factor, 0, 1)
+
+        gamma = 2.4
+        slope = 12.92
+        threshold = (0.04045 / slope)
+        low = img <= threshold
+        high = img > threshold
+        out = np.zeros_like(img)
+        out[low] = img[low] * slope
+        out[high] = 1.055 * (img[high] ** (1/gamma)) - 0.055
+    return out
+
 def align(model, data):
     """Align two trajectories using the method of Horn (closed-form).
 
@@ -212,7 +250,7 @@ def plot_rgbd_silhouette(color, depth, rastered_color, rastered_depth, presence_
 
 def report_progress(params, data, i, progress_bar, iter_time_idx, sil_thres, every_i=1, qual_every_i=1,
                     tracking=False, mapping=False, wandb_run=None, wandb_step=None, wandb_save_qual=False, online_time_idx=None,
-                    global_logging=True):
+                    global_logging=True, variables=None):
     if i % every_i == 0 or i == 1:
         if wandb_run is not None:
             if tracking:
@@ -239,7 +277,7 @@ def report_progress(params, data, i, progress_bar, iter_time_idx, sil_thres, eve
                                                    camera_grad=False)
 
         # Initialize Render Variables
-        rendervar = transformed_params2rendervar(params, transformed_gaussians)
+        rendervar = transformed_params2rendervar(params, transformed_gaussians, variables=variables)
         depth_sil_rendervar = transformed_params2depthplussilhouette(params, data['w2c'],
                                                                      transformed_gaussians)
         depth_sil, _, _, = Renderer(raster_settings=data['cam'])(**depth_sil_rendervar)
@@ -303,9 +341,11 @@ def report_progress(params, data, i, progress_bar, iter_time_idx, sil_thres, eve
 
 
 def eval_online(dataset, all_params, num_frames, eval_online_dir, sil_thres,
-                mapping_iters, add_new_gaussians, wandb_run=None, wandb_save_qual=False, eval_every=1):
+                mapping_iters, add_new_gaussians, wandb_run=None, wandb_save_qual=False, eval_every=1,
+                raw=False):
     print("Evaluating Online Final Parameters...")
     psnr_list = []
+    psnr_hdr_list = []   # PSNR in linear HDR space (only populated when raw=True)
     rmse_list = []
     l1_list = []
     plot_dir = os.path.join(eval_online_dir, "plots")
@@ -322,7 +362,7 @@ def eval_online(dataset, all_params, num_frames, eval_online_dir, sil_thres,
         intrinsics = intrinsics[:3, :3]
 
         # Process RGB-D Data
-        color = color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
+        color = color.permute(2, 0, 1) / (65535 if raw else 255)  # (H, W, C) -> (C, H, W)
         depth = depth.permute(2, 0, 1) # (H, W, C) -> (C, H, W)
 
         if time_idx == 0:
@@ -354,9 +394,22 @@ def eval_online(dataset, all_params, num_frames, eval_online_dir, sil_thres,
         # Render RGB and Calculate PSNR
         im, radius, _, = Renderer(raster_settings=curr_data['cam'])(**rendervar)
         if mapping_iters==0 and not add_new_gaussians:
-            psnr = calc_psnr(im * presence_sil_mask, curr_data['im'] * presence_sil_mask).mean()
+            weighted_im = im * presence_sil_mask
+            weighted_gt_im = curr_data['im'] * presence_sil_mask
         else:
-            psnr = calc_psnr(im, curr_data['im']).mean()
+            weighted_im = im
+            weighted_gt_im = curr_data['im']
+
+        psnr_hdr = calc_psnr(weighted_im, weighted_gt_im).mean()
+        if raw:
+            bright_factor = 0.98 / (torch.quantile(weighted_gt_im, 0.99) + 1e-6)
+            ldr_im = raw2normal(weighted_im, is_torch=True, bright_factor=bright_factor)
+            ldr_gt = raw2normal(weighted_gt_im, is_torch=True, bright_factor=bright_factor)
+            psnr = calc_psnr(ldr_im, ldr_gt).mean()
+        else:
+            psnr = psnr_hdr
+
+        psnr_hdr_list.append(psnr_hdr.cpu().numpy())
         psnr_list.append(psnr.cpu().numpy())
 
         # Compute Depth RMSE
@@ -394,23 +447,34 @@ def eval_online(dataset, all_params, num_frames, eval_online_dir, sil_thres,
 
     # Compute Average Metrics
     psnr_list = np.array(psnr_list)
+    psnr_hdr_list = np.array(psnr_hdr_list)
     rmse_list = np.array(rmse_list)
     l1_list = np.array(l1_list)
     avg_psnr = psnr_list.mean()
+    avg_psnr_hdr = psnr_hdr_list.mean()
     avg_rmse = rmse_list.mean()
     avg_l1 = l1_list.mean()
-    print("Online Average PSNR: {:.2f}".format(avg_psnr))
+    if raw:
+        print("Online Average PSNR (HDR linear): {:.2f}".format(avg_psnr_hdr))
+        print("Online Average PSNR (LDR tonemapped): {:.2f}".format(avg_psnr))
+    else:
+        print("Online Average PSNR: {:.2f}".format(avg_psnr))
     print("Online Average Depth RMSE: {:.2f}".format(avg_rmse))
     print("Online Average Depth L1: {:.2f}".format(avg_l1))
 
     if wandb_run is not None:
-        wandb_run.log({"Final Stats/Online Average PSNR": avg_psnr,
-                       "Final Stats/Online Average Depth RMSE": avg_rmse,
-                       "Final Stats/Online Average Depth L1": avg_l1,
-                       "Final Stats/step": 1})
+        log_dict = {"Final Stats/Online Average PSNR": avg_psnr,
+                    "Final Stats/Online Average Depth RMSE": avg_rmse,
+                    "Final Stats/Online Average Depth L1": avg_l1,
+                    "Final Stats/step": 1}
+        if raw:
+            log_dict["Final Stats/Online Average PSNR (HDR linear)"] = avg_psnr_hdr
+        wandb_run.log(log_dict)
 
     # Save metric lists as text files
     np.savetxt(os.path.join(eval_online_dir, "online_psnr.txt"), psnr_list)
+    if raw:
+        np.savetxt(os.path.join(eval_online_dir, "online_psnr_hdr.txt"), psnr_hdr_list)
     np.savetxt(os.path.join(eval_online_dir, "online_rmse.txt"), rmse_list)
     np.savetxt(os.path.join(eval_online_dir, "online_l1.txt"), l1_list)
 
@@ -432,9 +496,11 @@ def eval_online(dataset, all_params, num_frames, eval_online_dir, sil_thres,
 
 
 def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
-         mapping_iters, add_new_gaussians, wandb_run=None, wandb_save_qual=False, eval_every=1, save_frames=False):
+         mapping_iters, add_new_gaussians, wandb_run=None, wandb_save_qual=False, eval_every=1, save_frames=False,
+         raw=False, variables=None):
     print("Evaluating Final Parameters ...")
     psnr_list = []
+    psnr_hdr_list = []   # PSNR in linear HDR space (only populated when raw=True)
     rmse_list = []
     l1_list = []
     lpips_list = []
@@ -460,7 +526,7 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
         intrinsics = intrinsics[:3, :3]
 
         # Process RGB-D Data
-        color = color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
+        color = color.permute(2, 0, 1) / (65535 if raw else 255)  # (H, W, C) -> (C, H, W)
         depth = depth.permute(2, 0, 1) # (H, W, C) -> (C, H, W)
 
         if time_idx == 0:
@@ -482,7 +548,7 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
         curr_data = {'cam': cam, 'im': color, 'depth': depth, 'id': time_idx, 'intrinsics': intrinsics, 'w2c': first_frame_w2c}
 
         # Initialize Render Variables
-        rendervar = transformed_params2rendervar(final_params, transformed_gaussians)
+        rendervar = transformed_params2rendervar(final_params, transformed_gaussians, variables=variables)
         depth_sil_rendervar = transformed_params2depthplussilhouette(final_params, curr_data['w2c'],
                                                                      transformed_gaussians)
 
@@ -496,7 +562,7 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
         silhouette = depth_sil[1, :, :]
         presence_sil_mask = (silhouette > sil_thres)
 
-        # Render RGB and Calculate PSNR
+        # Render RGB and Calculate Metrics
         im, radius, _, = Renderer(raster_settings=curr_data['cam'])(**rendervar)
         if mapping_iters==0 and not add_new_gaussians:
             weighted_im = im * presence_sil_mask * valid_depth_mask
@@ -504,12 +570,28 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
         else:
             weighted_im = im * valid_depth_mask
             weighted_gt_im = curr_data['im'] * valid_depth_mask
-        psnr = calc_psnr(weighted_im, weighted_gt_im).mean()
-        ssim = ms_ssim(weighted_im.unsqueeze(0).cpu(), weighted_gt_im.unsqueeze(0).cpu(),
-                        data_range=1.0, size_average=True)
-        lpips_score = loss_fn_alex(torch.clamp(weighted_im.unsqueeze(0), 0.0, 1.0),
-                                    torch.clamp(weighted_gt_im.unsqueeze(0), 0.0, 1.0)).item()
 
+        # HDR PSNR in linear space
+        psnr_hdr = calc_psnr(weighted_im, weighted_gt_im).mean()
+
+        if raw:
+            # Tonemap to LDR using GT exposure for consistent comparison
+            bright_factor = 0.98 / (torch.quantile(weighted_gt_im, 0.99) + 1e-6)
+            ldr_im = raw2normal(weighted_im, is_torch=True, bright_factor=bright_factor)
+            ldr_gt = raw2normal(weighted_gt_im, is_torch=True, bright_factor=bright_factor)
+            psnr = calc_psnr(ldr_im, ldr_gt).mean()
+            ssim = ms_ssim(ldr_im.unsqueeze(0).cpu(), ldr_gt.unsqueeze(0).cpu(),
+                            data_range=1.0, size_average=True)
+            lpips_score = loss_fn_alex(torch.clamp(ldr_im.unsqueeze(0), 0.0, 1.0),
+                                        torch.clamp(ldr_gt.unsqueeze(0), 0.0, 1.0)).item()
+        else:
+            psnr = psnr_hdr
+            ssim = ms_ssim(weighted_im.unsqueeze(0).cpu(), weighted_gt_im.unsqueeze(0).cpu(),
+                            data_range=1.0, size_average=True)
+            lpips_score = loss_fn_alex(torch.clamp(weighted_im.unsqueeze(0), 0.0, 1.0),
+                                        torch.clamp(weighted_gt_im.unsqueeze(0), 0.0, 1.0)).item()
+
+        psnr_hdr_list.append(psnr_hdr.cpu().numpy())
         psnr_list.append(psnr.cpu().numpy())
         ssim_list.append(ssim.cpu().numpy())
         lpips_list.append(lpips_score)
@@ -602,31 +684,42 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
 
     # Compute Average Metrics
     psnr_list = np.array(psnr_list)
+    psnr_hdr_list = np.array(psnr_hdr_list)
     rmse_list = np.array(rmse_list)
     l1_list = np.array(l1_list)
     ssim_list = np.array(ssim_list)
     lpips_list = np.array(lpips_list)
     avg_psnr = psnr_list.mean()
+    avg_psnr_hdr = psnr_hdr_list.mean()
     avg_rmse = rmse_list.mean()
     avg_l1 = l1_list.mean()
     avg_ssim = ssim_list.mean()
     avg_lpips = lpips_list.mean()
-    print("Average PSNR: {:.2f}".format(avg_psnr))
+    if raw:
+        print("Average PSNR (HDR linear): {:.2f}".format(avg_psnr_hdr))
+        print("Average PSNR (LDR tonemapped): {:.2f}".format(avg_psnr))
+    else:
+        print("Average PSNR: {:.2f}".format(avg_psnr))
     print("Average Depth RMSE: {:.2f} cm".format(avg_rmse*100))
     print("Average Depth L1: {:.2f} cm".format(avg_l1*100))
     print("Average MS-SSIM: {:.3f}".format(avg_ssim))
     print("Average LPIPS: {:.3f}".format(avg_lpips))
 
     if wandb_run is not None:
-        wandb_run.log({"Final Stats/Average PSNR": avg_psnr,
-                       "Final Stats/Average Depth RMSE": avg_rmse,
-                       "Final Stats/Average Depth L1": avg_l1,
-                       "Final Stats/Average MS-SSIM": avg_ssim,
-                       "Final Stats/Average LPIPS": avg_lpips,
-                       "Final Stats/step": 1})
+        log_dict = {"Final Stats/Average PSNR": avg_psnr,
+                    "Final Stats/Average Depth RMSE": avg_rmse,
+                    "Final Stats/Average Depth L1": avg_l1,
+                    "Final Stats/Average MS-SSIM": avg_ssim,
+                    "Final Stats/Average LPIPS": avg_lpips,
+                    "Final Stats/step": 1}
+        if raw:
+            log_dict["Final Stats/Average PSNR (HDR linear)"] = avg_psnr_hdr
+        wandb_run.log(log_dict)
 
     # Save metric lists as text files
     np.savetxt(os.path.join(eval_dir, "psnr.txt"), psnr_list)
+    if raw:
+        np.savetxt(os.path.join(eval_dir, "psnr_hdr.txt"), psnr_hdr_list)
     np.savetxt(os.path.join(eval_dir, "rmse.txt"), rmse_list)
     np.savetxt(os.path.join(eval_dir, "l1.txt"), l1_list)
     np.savetxt(os.path.join(eval_dir, "ssim.txt"), ssim_list)
@@ -651,9 +744,11 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
 
 
 def eval_nvs(dataset, final_params, num_frames, eval_dir, sil_thres,
-         mapping_iters, add_new_gaussians, wandb_run=None, wandb_save_qual=False, eval_every=1, save_frames=False):
+         mapping_iters, add_new_gaussians, wandb_run=None, wandb_save_qual=False, eval_every=1, save_frames=False,
+         raw=False, variables=None):
     print("Evaluating Final Parameters for Novel View Synthesis ...")
     psnr_list = []
+    psnr_hdr_list = []   # PSNR in linear HDR space (only populated when raw=True)
     rmse_list = []
     l1_list = []
     lpips_list = []
@@ -678,7 +773,7 @@ def eval_nvs(dataset, final_params, num_frames, eval_dir, sil_thres,
         intrinsics = intrinsics[:3, :3]
 
         # Process RGB-D Data
-        color = color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
+        color = color.permute(2, 0, 1) / (65535 if raw else 255)  # (H, W, C) -> (C, H, W)
         depth = depth.permute(2, 0, 1) # (H, W, C) -> (C, H, W)
 
         if time_idx == 0:
@@ -720,7 +815,7 @@ def eval_nvs(dataset, final_params, num_frames, eval_dir, sil_thres,
         curr_data = {'cam': cam, 'im': color, 'depth': depth, 'id': time_idx, 'intrinsics': intrinsics, 'w2c': first_frame_w2c}
 
         # Initialize Render Variables
-        rendervar = transformed_params2rendervar(final_params, transformed_gaussians)
+        rendervar = transformed_params2rendervar(final_params, transformed_gaussians, variables=variables)
         depth_sil_rendervar = transformed_params2depthplussilhouette(final_params, curr_data['w2c'],
                                                                      transformed_gaussians)
 
@@ -742,7 +837,7 @@ def eval_nvs(dataset, final_params, num_frames, eval_dir, sil_thres,
         else:
             valid_nvs_frames.append(True)
 
-        # Render RGB and Calculate PSNR
+        # Render RGB and Calculate Metrics
         im, radius, _, = Renderer(raster_settings=curr_data['cam'])(**rendervar)
         if mapping_iters==0 and not add_new_gaussians:
             weighted_im = im * presence_sil_mask * valid_depth_mask
@@ -751,12 +846,28 @@ def eval_nvs(dataset, final_params, num_frames, eval_dir, sil_thres,
             weighted_im = im * valid_depth_mask
             weighted_gt_im = curr_data['im'] * valid_depth_mask
         diff_rgb = torch.abs(weighted_im - weighted_gt_im).mean(dim=0).detach()
-        psnr = calc_psnr(weighted_im, weighted_gt_im).mean()
-        ssim = ms_ssim(weighted_im.unsqueeze(0).cpu(), weighted_gt_im.unsqueeze(0).cpu(),
-                        data_range=1.0, size_average=True)
-        lpips_score = loss_fn_alex(torch.clamp(weighted_im.unsqueeze(0), 0.0, 1.0),
-                                    torch.clamp(weighted_gt_im.unsqueeze(0), 0.0, 1.0)).item()
 
+        # HDR PSNR in linear space
+        psnr_hdr = calc_psnr(weighted_im, weighted_gt_im).mean()
+
+        if raw:
+            # Tonemap to LDR using GT exposure for consistent comparison
+            bright_factor = 0.98 / (torch.quantile(weighted_gt_im, 0.99) + 1e-6)
+            ldr_im = raw2normal(weighted_im, is_torch=True, bright_factor=bright_factor)
+            ldr_gt = raw2normal(weighted_gt_im, is_torch=True, bright_factor=bright_factor)
+            psnr = calc_psnr(ldr_im, ldr_gt).mean()
+            ssim = ms_ssim(ldr_im.unsqueeze(0).cpu(), ldr_gt.unsqueeze(0).cpu(),
+                            data_range=1.0, size_average=True)
+            lpips_score = loss_fn_alex(torch.clamp(ldr_im.unsqueeze(0), 0.0, 1.0),
+                                        torch.clamp(ldr_gt.unsqueeze(0), 0.0, 1.0)).item()
+        else:
+            psnr = psnr_hdr
+            ssim = ms_ssim(weighted_im.unsqueeze(0).cpu(), weighted_gt_im.unsqueeze(0).cpu(),
+                            data_range=1.0, size_average=True)
+            lpips_score = loss_fn_alex(torch.clamp(weighted_im.unsqueeze(0), 0.0, 1.0),
+                                        torch.clamp(weighted_gt_im.unsqueeze(0), 0.0, 1.0)).item()
+
+        psnr_hdr_list.append(psnr_hdr.cpu().numpy())
         psnr_list.append(psnr.cpu().numpy())
         ssim_list.append(ssim.cpu().numpy())
         lpips_list.append(lpips_score)
@@ -817,32 +928,43 @@ def eval_nvs(dataset, final_params, num_frames, eval_dir, sil_thres,
 
     # Compute Average Metrics based on valid NVS frames
     psnr_list = np.array(psnr_list)
+    psnr_hdr_list = np.array(psnr_hdr_list)
     rmse_list = np.array(rmse_list)
     l1_list = np.array(l1_list)
     ssim_list = np.array(ssim_list)
     lpips_list = np.array(lpips_list)
     valid_nvs_frames = np.array(valid_nvs_frames)
     avg_psnr = psnr_list[valid_nvs_frames].mean()
+    avg_psnr_hdr = psnr_hdr_list[valid_nvs_frames].mean()
     avg_rmse = rmse_list[valid_nvs_frames].mean()
     avg_l1 = l1_list[valid_nvs_frames].mean()
     avg_ssim = ssim_list[valid_nvs_frames].mean()
     avg_lpips = lpips_list[valid_nvs_frames].mean()
-    print("Average PSNR: {:.2f}".format(avg_psnr))
+    if raw:
+        print("Average PSNR (HDR linear): {:.2f}".format(avg_psnr_hdr))
+        print("Average PSNR (LDR tonemapped): {:.2f}".format(avg_psnr))
+    else:
+        print("Average PSNR: {:.2f}".format(avg_psnr))
     print("Average Depth RMSE: {:.2f} cm".format(avg_rmse*100))
     print("Average Depth L1: {:.2f} cm".format(avg_l1*100))
     print("Average MS-SSIM: {:.3f}".format(avg_ssim))
     print("Average LPIPS: {:.3f}".format(avg_lpips))
 
     if wandb_run is not None:
-        wandb_run.log({"Final Stats/Average PSNR": avg_psnr,
-                       "Final Stats/Average Depth RMSE": avg_rmse,
-                       "Final Stats/Average Depth L1": avg_l1,
-                       "Final Stats/Average MS-SSIM": avg_ssim,
-                       "Final Stats/Average LPIPS": avg_lpips,
-                       "Final Stats/step": 1})
+        log_dict = {"Final Stats/Average PSNR": avg_psnr,
+                    "Final Stats/Average Depth RMSE": avg_rmse,
+                    "Final Stats/Average Depth L1": avg_l1,
+                    "Final Stats/Average MS-SSIM": avg_ssim,
+                    "Final Stats/Average LPIPS": avg_lpips,
+                    "Final Stats/step": 1}
+        if raw:
+            log_dict["Final Stats/Average PSNR (HDR linear)"] = avg_psnr_hdr
+        wandb_run.log(log_dict)
 
     # Save metric lists as text files
     np.savetxt(os.path.join(eval_dir, "psnr.txt"), psnr_list)
+    if raw:
+        np.savetxt(os.path.join(eval_dir, "psnr_hdr.txt"), psnr_hdr_list)
     np.savetxt(os.path.join(eval_dir, "rmse.txt"), rmse_list)
     np.savetxt(os.path.join(eval_dir, "l1.txt"), l1_list)
     np.savetxt(os.path.join(eval_dir, "ssim.txt"), ssim_list)

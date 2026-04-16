@@ -16,6 +16,7 @@ class RawSLAMDataset(GradSLAMDataset):
         config_dict,
         basedir,
         sequence,
+        raw: Optional[bool] = False,
         stride: Optional[int] = None,
         start: Optional[int] = 0,
         end: Optional[int] = -1,
@@ -66,8 +67,11 @@ class RawSLAMDataset(GradSLAMDataset):
         groundtruth_file = os.path.join(self.input_folder, 'groundtruth.txt')
         with open(groundtruth_file, 'r') as f:
             poses_lines = f.readlines()
-
-        image_list = os.path.join(self.input_folder, 'sRGB')
+        if self.raw:
+            image_list = os.path.join(self.input_folder, 'raw_linear_sRGB')
+        else:
+            image_list = os.path.join(self.input_folder, 'sRGB')
+        
         depth_list = os.path.join(self.input_folder, 'depth')
 
         color_paths, depth_paths = [], []

@@ -1,6 +1,93 @@
 import torch
 import torch.nn.functional as F
+import torch.nn as nn
 from utils.slam_external import build_rotation
+
+_FINAL_ACT_MAP = {
+    "torch.exp": torch.exp,
+    "torch.sigmoid": torch.sigmoid,
+    "torch.relu": torch.relu,
+    "none": lambda x: x,
+}
+
+class TinyColorMLP(nn.Module):
+    def __init__(self, in_feats=16, dir_feats=3,
+                 mid_feats_list=[16, 16], out_feats=3,
+                 final_bias=None, final_act='torch.exp',
+                 act='leaky_relu',detach=False) -> None:
+        super().__init__()
+        self.detach = detach
+        if act == 'leaky_relu':
+            self.act = nn.LeakyReLU(0.1, inplace=True)
+        elif act == 'relu':
+            self.act = nn.ReLU(inplace=True)
+        else:
+            raise NotImplementedError
+        assert dir_feats == 3 or dir_feats == 9 or dir_feats == 19
+        self.dir_feats = dir_feats
+        feats = [in_feats+dir_feats] + mid_feats_list + [out_feats]
+        self.linears = nn.ModuleList([nn.Linear(feats[i], feats[i+1]) for i in range(len(feats)-2)])
+        self.linears.append(nn.Linear(feats[-2], feats[-1], bias=False))
+
+        # ── Weight initialisation ────────────────────────────────────────────
+        # PyTorch Linear defaults to kaiming_uniform_(a=√5), which is calibrated
+        # for plain ReLU.  Our hidden activation is LeakyReLU(0.1), so we must
+        # use a=0.1 to keep the variance of activations stable across layers.
+        for layer in self.linears[:-1]:
+            nn.init.kaiming_uniform_(layer.weight, a=0.1, nonlinearity='leaky_relu')
+            if layer.bias is not None:
+                nn.init.zeros_(layer.bias)
+        # Final layer: zero-init weights so the MLP output (before adding
+        # features_dc) starts at exactly 0.  This means the initial rendered
+        # colour = exp(0 + features_dc), i.e. features_dc alone determines the
+        # starting prediction — correct once features_dc is initialised from
+        # log(point-cloud colour).  Large random final-layer weights would
+        # produce chaotic initial renders and waste the first N optimisation steps.
+        nn.init.zeros_(self.linears[-1].weight)
+
+        if final_act not in _FINAL_ACT_MAP:
+            raise ValueError(f"Unknown final_act '{final_act}'. Supported: {list(_FINAL_ACT_MAP)}")
+        self.final_act = _FINAL_ACT_MAP[final_act]
+        if final_bias is not None:
+            self.final_bias = nn.Parameter(torch.ones(1, out_feats) * final_bias)
+        else:
+            self.register_buffer('final_bias', torch.zeros(1, out_feats))
+
+    def forward(self, color_feats, dirs, w_bias=True):
+        if self.detach:
+            dirs = dirs.detach()
+        if self.dir_feats >= 9:
+            x, y, z = dirs[..., 0:1], dirs[..., 1:2], dirs[..., 2:3]
+            xx, yy, zz = x * x, y * y, z * z
+            xy, yz, xz = x * y, y * z, x * z
+            dirs = torch.cat([dirs, xx, yy, zz, xy, yz, xz], dim=-1)
+            if self.dir_feats == 19:
+                xxx, xxy, xyy = xx * x, xx * y, xy * y
+                zzz, xzz, xxz = zz * z, xz * z, xx * z
+                yyy, yzz, yyz = yy * y, yz * z, yy * z
+                xyz = xy * z
+                dirs = torch.cat([dirs, xxx, xxy, xyy,
+                                        zzz, xzz, xxz,
+                                        yyy, yzz, yyz,
+                                        xyz
+                                 ], dim=-1)
+        final_bias = self.final_bias.to(dirs.device)
+        if isinstance(color_feats, tuple):
+            final_bias = color_feats[0]
+            color_feats = color_feats[1]
+
+        # Squeeze in case of 3D shapes from legacy logic
+        if color_feats.dim() == 3:
+            color_feats = color_feats.squeeze(1)
+        if final_bias.dim() == 3:
+            final_bias = final_bias.squeeze(1)
+
+        out = torch.cat([color_feats, dirs], dim=-1)
+        for linear in self.linears[:-1]:
+            out = self.act(linear(out))
+        logit = self.linears[-1](out) + (final_bias if w_bias else 0)
+        return self.final_act(logit.clamp(-10, 10))  # exp range: [4.5e-5, 22026]
+
 
 def l1_loss_v1(x, y):
     return torch.abs((x - y)).mean()
@@ -8,6 +95,25 @@ def l1_loss_v1(x, y):
 
 def l1_loss_v2(x, y):
     return (torch.abs(x - y).sum(-1)).mean()
+
+
+def rawnerf_loss(rgb_render_clip, gt, mask=None, eps=1e-2):
+    """
+    Reweighted L2 loss based on the gradient of the log tonemapping curve.
+    This effectively penalizes relative error rather than absolute error.
+    """
+    # 1. Comparison in linear space
+    resid_sq = (rgb_render_clip - gt) ** 2
+
+    # 2. Scaling by the gradient of the log curve: 1 / (x + eps)
+    # We detach the denominator so it acts as a fixed weight per pixel
+    scaling_grad = 1.0 / (rgb_render_clip.detach() + eps)
+
+    loss = resid_sq * (scaling_grad ** 2)
+
+    if mask is not None:
+        return loss[mask].mean()
+    return loss.mean()
 
 
 def weighted_l2_loss_v1(x, y, w):
@@ -42,7 +148,7 @@ def _sqrt_positive_part(x: torch.Tensor) -> torch.Tensor:
 
 def matrix_to_quaternion(matrix: torch.Tensor) -> torch.Tensor:
     """
-    Convert rotations given as rotation matrices to quaternions.
+rawnerf_eps    Convert rotations given as rotation matrices to quaternions.
 
     Args:
         matrix: Rotation matrices as tensor of shape (..., 3, 3).
@@ -121,16 +227,24 @@ def params2rendervar(params):
     return rendervar
 
 
-def transformed_params2rendervar(params, transformed_gaussians):
+def transformed_params2rendervar(params, transformed_gaussians, variables=None):
     # Check if Gaussians are Isotropic
     if params['log_scales'].shape[1] == 1:
         log_scales = torch.tile(params['log_scales'], (1, 3))
     else:
         log_scales = params['log_scales']
+    
+    # Check if we're using MLP for colors
+    if variables is not None and 'color_mlp' in variables:
+        view_dirs = torch.nn.functional.normalize(transformed_gaussians['means3D'], dim=-1)
+        colors_precomp = variables['color_mlp']((params['features_dc'], params['features_rest']), view_dirs)
+    else:
+        colors_precomp = params['rgb_colors']
+
     # Initialize Render Variables
     rendervar = {
         'means3D': transformed_gaussians['means3D'],
-        'colors_precomp': params['rgb_colors'],
+        'colors_precomp': colors_precomp,
         'rotations': F.normalize(transformed_gaussians['unnorm_rotations']),
         'opacities': torch.sigmoid(params['logit_opacities']),
         'scales': torch.exp(log_scales),

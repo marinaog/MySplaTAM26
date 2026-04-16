@@ -134,6 +134,7 @@ class GradSLAMDataset(torch.utils.data.Dataset):
         self.cy = config_dict["camera_params"]["cy"]
 
         self.dtype = dtype
+        self.raw = config_dict.get('raw')
 
         self.desired_height = desired_height
         self.desired_width = desired_width
@@ -227,7 +228,7 @@ class GradSLAMDataset(torch.utils.data.Dataset):
             interpolation=cv2.INTER_LINEAR,
         )
         if self.normalize_color:
-            color = datautils.normalize_image(color)
+            color = datautils.normalize_image(color, self.raw)
         if self.channels_first:
             color = datautils.channels_first(color)
         return color
@@ -247,7 +248,7 @@ class GradSLAMDataset(torch.utils.data.Dataset):
             - Output: :math:`(H, W, 1)` if `self.channels_first == False`, else :math:`(1, H, W)`.
         """
         depth = cv2.resize(
-            depth.astype(float),
+            (depth if self.raw else depth.astype(float)),
             (self.desired_width, self.desired_height),
             interpolation=cv2.INTER_NEAREST,
         )

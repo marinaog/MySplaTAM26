@@ -16,7 +16,7 @@ __all__ = [
 ]
 
 
-def normalize_image(rgb: Union[torch.Tensor, np.ndarray]):
+def normalize_image(rgb: Union[torch.Tensor, np.ndarray], raw: bool = False):
     r"""Normalizes RGB image values from :math:`[0, 255]` range to :math:`[0, 1]` range.
 
     Args:
@@ -30,9 +30,15 @@ def normalize_image(rgb: Union[torch.Tensor, np.ndarray]):
         - Output: Same shape as input :math:`(*)`
     """
     if torch.is_tensor(rgb):
-        return rgb.float() / 255
+        if raw:
+            return rgb.float() / 65535
+        else:
+            return rgb.float() / 255
     elif isinstance(rgb, np.ndarray):
-        return rgb.astype(float) / 255
+        if raw:
+            return rgb.astype(float) / 65535
+        else:
+            return rgb.astype(float) / 255
     else:
         raise TypeError("Unsupported input rgb type: %r" % type(rgb))
 
