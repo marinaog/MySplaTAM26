@@ -1,0 +1,11 @@
+dataset_name: 'rawslam'
+camera_params:
+  image_height: 1080
+  image_width: 1920
+  fx: 1380.4
+  fy: 1379.3
+  cx: 961.6
+  cy: 568.1
+  crop_edge: 0
+  png_depth_scale: 1000.0
+  # distortion: [0.2624, -0.9531, -0.0054, 0.0026, 1.1633]
