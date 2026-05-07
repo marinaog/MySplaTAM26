@@ -116,6 +116,24 @@ def make_lineset(all_pts, all_cols, num_lines):
     return linesets
 
 
+def get_viz_scale(cfg, params, all_w2cs):
+    cam_centers = np.array([np.linalg.inv(w2c)[:3, 3] for w2c in all_w2cs], dtype=np.float64)
+    if cam_centers.size == 0:
+        cam_extent = 0.0
+    else:
+        cam_extent = np.linalg.norm(cam_centers.max(axis=0) - cam_centers.min(axis=0))
+
+    means3d = params['means3D'].detach().cpu().numpy()
+    if means3d.shape[0] > 50000:
+        means3d = means3d[::max(1, means3d.shape[0] // 50000)]
+    scene_extent = np.linalg.norm(means3d.max(axis=0) - means3d.min(axis=0))
+
+    base_extent = max(scene_extent, cam_extent, 1e-3)
+    frustum_size = cfg.get('frustum_size', max(0.15, 0.05 * base_extent))
+    view_offset = cfg.get('viz_cam_offset', 0.6 * base_extent)
+    return frustum_size, view_offset
+
+
 def render(w2c, k, timestep_data, timestep_depth_data, cfg):
     with torch.no_grad():
         cam = setup_camera(cfg['viz_w'], cfg['viz_h'], k, w2c, cfg['viz_near'], cfg['viz_far'])
@@ -186,6 +204,7 @@ def visualize(scene_path, cfg):
     first_frame_w2c, k = load_camera(cfg, scene_path)
 
     params, all_w2cs = load_scene_data(scene_path)
+    frustum_size, view_offset = get_viz_scale(cfg, params, all_w2cs)
     print(params['means3D'].shape)
     vis = o3d.visualization.Visualizer()
     vis.create_window(width=int(cfg['viz_w'] * cfg['view_scale']), 
@@ -204,7 +223,6 @@ def visualize(scene_path, cfg):
     h = cfg['viz_h']
 
     # Initialize Estimated Camera Frustums
-    frustum_size = 0.045
     num_t = len(all_w2cs)
     cam_centers = []
     cam_colormap = plt.get_cmap('cool')
@@ -218,7 +236,7 @@ def visualize(scene_path, cfg):
     view_control = vis.get_view_control()
     cparams = o3d.camera.PinholeCameraParameters()
     first_view_w2c = first_frame_w2c
-    first_view_w2c[:3, 3] = first_view_w2c[:3, 3] + np.array([0, 0, 0.5])
+    first_view_w2c[:3, 3] = first_view_w2c[:3, 3] + np.array([0, 0, view_offset])
     cparams.extrinsic = first_view_w2c
     cparams.intrinsic.intrinsic_matrix = view_k
     cparams.intrinsic.height = int(cfg['viz_h'] * cfg['view_scale'])

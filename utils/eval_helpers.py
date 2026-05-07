@@ -29,9 +29,10 @@ def raw2normal(img, is_torch=False, bright_factor=None):
     If omitted, the factor is derived from ``img`` itself (auto-exposure).
     """
     if is_torch:
-        if bright_factor is None:
-            bright_factor = 0.98 / torch.quantile(img, 0.99)
-        img = torch.clamp(img * bright_factor, 0.0, 1.0)
+        #if bright_factor is None:
+        #    bright_factor = 0.98 / torch.quantile(img, 0.99)
+        #img = torch.clamp(img * bright_factor, 0.0, 1.0)
+        img = torch.clamp(img, 0.0, 1.0)
 
         gamma = 2.4
         slope = 12.92
@@ -45,7 +46,7 @@ def raw2normal(img, is_torch=False, bright_factor=None):
         out[high] = 1.055 * torch.pow(img[high], 1.0 / gamma) - 0.055
 
     else:
-        bright_factor = 0.98 / (np.percentile(img, 99) + 1e-6)
+        #bright_factor = 0.98 / (np.percentile(img, 99) + 1e-6)
         img = np.clip(img * bright_factor, 0, 1)
 
         gamma = 2.4
@@ -178,9 +179,10 @@ def log_tracking_ate_history(wandb_run, params, iter_gt_w2c_list, iter_time_idx,
 
 def report_loss(losses, wandb_run, wandb_step, tracking=False, mapping=False):
     # Update loss dict
+    depth_loss = losses['depth'].item() if 'depth' in losses else 0.0
     loss_dict = {'Loss': losses['loss'].item(),
                  'Image Loss': losses['im'].item(),
-                 'Depth Loss': losses['depth'].item(),}
+                 'Depth Loss': depth_loss,}
     if tracking:
         tracking_loss_dict = {}
         for k, v in loss_dict.items():

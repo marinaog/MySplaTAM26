@@ -243,7 +243,7 @@ def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio,
 def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_for_loss,
              sil_thres, use_l1, ignore_outlier_depth_loss, tracking=False,
              mapping=False, do_ba=False, plot_dir=None, visualize_tracking_loss=False, tracking_iteration=None,
-             use_rawnerf_loss=False, rawnerf_eps=1e-3):
+             use_rawnerf_loss=False, rawnerf_eps=1e-3, raw=False):
     # Initialize Loss Dictionary
     losses = {}
 
@@ -270,7 +270,7 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
                                              camera_grad=False)
 
     # Initialize Render Variables
-    rendervar = transformed_params2rendervar(params, transformed_gaussians, variables=variables)
+    rendervar = transformed_params2rendervar(params, transformed_gaussians, variables=variables, tracking=tracking)
     depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
                                                                  transformed_gaussians)
 
@@ -301,8 +301,9 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     if tracking and use_sil_for_loss:
         mask = mask & presence_sil_mask
 
-    # Depth loss
-    if use_l1:
+    # Depth loss — always L1 regardless of image loss type; depth is geometric,
+    # not photometric, so the rawnerf reweighting does not apply to it.
+    if use_l1 or use_rawnerf_loss:
         mask = mask.detach()
         if tracking:
             losses['depth'] = torch.abs(curr_data['depth'] - depth)[mask].sum()
@@ -310,25 +311,43 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
             losses['depth'] = torch.abs(curr_data['depth'] - depth)[mask].mean()
 
     # RGB Loss
+    # Always clamp rendered image to non-negative (physical constraint).
+    im_for_loss = im.clamp(min=0.0)
+    gt_for_loss = curr_data['im']
+
+    # When tracking on raw HDR data, apply a pure-power gamma-2.2 tonemap so
+    # the photometric Jacobian has meaningful contrast across the full dynamic
+    # range.  Dark surfaces near zero in linear space map to ~0.1–0.5 in gamma
+    # space, giving informative gradients for camera-pose alignment. The (2.2, 0)
+    # curve has no linear segment (threshold=0), so it is simply x^(1/2.2).
+    # Mapping is left in linear space where the rawnerf noise-weighting is valid.
+    if tracking and raw:
+        _gamma = 1.0 / 2.2
+        # Add a small epsilon before pow: d/dx[x^p] = p·x^(p-1) → ∞ as x→0 for p<1.
+        # Unrendered pixels (im=0 exactly) would otherwise produce inf gradients
+        # that propagate NaN into the camera pose parameters.
+        _eps = 1e-8
+        im_for_loss = (im_for_loss + _eps).pow(_gamma)
+        gt_for_loss = (gt_for_loss.clamp(min=0.0) + _eps).pow(_gamma)
+
     if use_rawnerf_loss:
-        im_clipped = im.clamp(min=0.0)
         if tracking and (use_sil_for_loss or ignore_outlier_depth_loss):
             color_mask = torch.tile(mask, (3, 1, 1))
             color_mask = color_mask.detach()
-            losses['im'] = rawnerf_loss(im_clipped, curr_data['im'], mask=color_mask, eps=rawnerf_eps)
+            losses['im'] = rawnerf_loss(im_for_loss, gt_for_loss, mask=color_mask, eps=rawnerf_eps)
         elif tracking:
-            losses['im'] = rawnerf_loss(im_clipped, curr_data['im'], eps=rawnerf_eps)
+            losses['im'] = rawnerf_loss(im_for_loss, gt_for_loss, eps=rawnerf_eps)
         else:
-            losses['im'] = rawnerf_loss(im_clipped, curr_data['im'], eps=rawnerf_eps)
+            losses['im'] = rawnerf_loss(im_for_loss, gt_for_loss, eps=rawnerf_eps)
     else:
         if tracking and (use_sil_for_loss or ignore_outlier_depth_loss):
             color_mask = torch.tile(mask, (3, 1, 1))
             color_mask = color_mask.detach()
-            losses['im'] = torch.abs(curr_data['im'] - im)[color_mask].sum()
+            losses['im'] = torch.abs(gt_for_loss - im_for_loss)[color_mask].sum()
         elif tracking:
-            losses['im'] = torch.abs(curr_data['im'] - im).sum()
+            losses['im'] = torch.abs(gt_for_loss - im_for_loss).sum()
         else:
-            losses['im'] = 0.8 * l1_loss_v1(im, curr_data['im']) + 0.2 * (1.0 - calc_ssim(im, curr_data['im']))
+            losses['im'] = 0.8 * l1_loss_v1(im_for_loss, gt_for_loss) + 0.2 * (1.0 - calc_ssim(im_for_loss, gt_for_loss))
 
     # Visualize the Diff Images
     if tracking and visualize_tracking_loss:
@@ -407,7 +426,8 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution, use_
         'log_scales': log_scales,
     }
     if use_mlp:
-        params['features_dc'] = torch.zeros((num_pts, 3), dtype=torch.float, device="cuda")
+        rgb0 = new_pt_cld[:, 3:6].clamp(min=1e-6)
+        params['features_dc'] = torch.log(rgb0).float()
         params['features_rest'] = torch.zeros((num_pts, 16), dtype=torch.float, device="cuda")
 
     for k, v in params.items():
@@ -526,7 +546,7 @@ def rgbd_slam(config: dict):
         wandb_tracking_step = 0
         wandb_mapping_step = 0
         wandb_run = wandb.init(project=config['wandb']['project'],
-                               name=config['wandb']['name'],
+                               name=config["run_name"],
                                config=config)
         wandb_run.define_metric("Trajectory/Frame")
         wandb_run.define_metric("Trajectory/ATE RMSE vs Frame", step_metric="Trajectory/Frame")
@@ -771,7 +791,8 @@ def rgbd_slam(config: dict):
                                                    plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
                                                    tracking_iteration=iter,
                                                    use_rawnerf_loss=config['tracking']['use_rawnerf_loss'],
-                                                   rawnerf_eps=config['tracking']['rawnerf_eps'])
+                                                   rawnerf_eps=config['tracking']['rawnerf_eps'],
+                                                   raw=raw)
                 if config['use_wandb']:
                     # Report Loss
                     wandb_tracking_step = report_loss(losses, wandb_run, wandb_tracking_step, tracking=True)
@@ -810,7 +831,7 @@ def rgbd_slam(config: dict):
                 # Check if we should stop tracking
                 iter += 1
                 if iter == num_iters_tracking:
-                    if losses['depth'] < config['tracking']['depth_loss_thres'] and config['tracking']['use_depth_loss_thres']:
+                    if losses.get('depth', float('inf')) < config['tracking']['depth_loss_thres'] and config['tracking']['use_depth_loss_thres']:
                         break
                     elif config['tracking']['use_depth_loss_thres'] and not do_continue_slam:
                         do_continue_slam = True
@@ -887,7 +908,8 @@ def rgbd_slam(config: dict):
                 # Add new Gaussians to the scene based on the Silhouette
                 params, variables = add_new_gaussians(params, variables, densify_curr_data,
                                                       config['mapping']['sil_thres'], time_idx,
-                                                      config['mean_sq_dist_method'], config['gaussian_distribution'])
+                                                      config['mean_sq_dist_method'], config['gaussian_distribution'],
+                                                      use_mlp=use_mlp)
                 post_num_pts = params['means3D'].shape[0]
                 if config['use_wandb']:
                     wandb_run.log({"Mapping/Number of Gaussians": post_num_pts,

@@ -85,8 +85,8 @@ class TinyColorMLP(nn.Module):
         out = torch.cat([color_feats, dirs], dim=-1)
         for linear in self.linears[:-1]:
             out = self.act(linear(out))
-        logit = self.linears[-1](out) + (final_bias if w_bias else 0)
-        return self.final_act(logit.clamp(-10, 10))  # exp range: [4.5e-5, 22026]
+
+        return self.linears[-1](out) + (final_bias if w_bias else 0)
 
 
 def l1_loss_v1(x, y):
@@ -227,16 +227,19 @@ def params2rendervar(params):
     return rendervar
 
 
-def transformed_params2rendervar(params, transformed_gaussians, variables=None):
+def transformed_params2rendervar(params, transformed_gaussians, variables=None, tracking=False):
     # Check if Gaussians are Isotropic
     if params['log_scales'].shape[1] == 1:
         log_scales = torch.tile(params['log_scales'], (1, 3))
     else:
         log_scales = params['log_scales']
-    
+
     # Check if we're using MLP for colors
     if variables is not None and 'color_mlp' in variables:
-        view_dirs = torch.nn.functional.normalize(transformed_gaussians['means3D'], dim=-1)
+        # During tracking, detach means3D before computing view directions so the MLP
+        # colour output is treated as a fixed appearance signal.
+        means_for_dirs = transformed_gaussians['means3D'].detach() if tracking else transformed_gaussians['means3D']
+        view_dirs = torch.nn.functional.normalize(means_for_dirs, dim=-1)
         colors_precomp = variables['color_mlp']((params['features_dc'], params['features_rest']), view_dirs)
     else:
         colors_precomp = params['rgb_colors']
@@ -323,7 +326,7 @@ def get_depth_and_silhouette(pts_3D, w2c):
     depth_silhouette[:, 0] = depth_z.squeeze(-1)
     depth_silhouette[:, 1] = 1.0
     depth_silhouette[:, 2] = depth_z_sq.squeeze(-1)
-    
+
     return depth_silhouette
 
 
@@ -366,13 +369,13 @@ def transformed_params2depthplussilhouette(params, w2c, transformed_gaussians):
 def transform_to_frame(params, time_idx, gaussians_grad, camera_grad):
     """
     Function to transform Isotropic or Anisotropic Gaussians from world frame to camera frame.
-    
+
     Args:
         params: dict of parameters
         time_idx: time index to transform to
         gaussians_grad: enable gradients for Gaussians
         camera_grad: enable gradients for camera pose
-    
+
     Returns:
         transformed_gaussians: Transformed Gaussians (dict containing means3D & unnorm_rotations)
     """
@@ -392,7 +395,7 @@ def transform_to_frame(params, time_idx, gaussians_grad, camera_grad):
         transform_rots = False # Isotropic Gaussians
     else:
         transform_rots = True # Anisotropic Gaussians
-    
+
     # Get Centers and Unnorm Rots of Gaussians in World Frame
     if gaussians_grad:
         pts = params['means3D']
@@ -400,7 +403,7 @@ def transform_to_frame(params, time_idx, gaussians_grad, camera_grad):
     else:
         pts = params['means3D'].detach()
         unnorm_rots = params['unnorm_rotations'].detach()
-    
+
     transformed_gaussians = {}
     # Transform Centers of Gaussians to Camera Frame
     pts_ones = torch.ones(pts.shape[0], 1).cuda().float()
