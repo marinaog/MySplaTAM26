@@ -29,7 +29,8 @@ class RawSLAMDataset(GradSLAMDataset):
     ):
         self.input_folder = os.path.join(basedir, sequence)
         self.pose_path = None
-        self.raw = config_dict.get('raw')
+
+        self.raw = raw
         super().__init__(
             config_dict,
             stride=stride,
@@ -71,7 +72,7 @@ class RawSLAMDataset(GradSLAMDataset):
             image_list = os.path.join(self.input_folder, 'raw_linear_sRGB')
         else:
             image_list = os.path.join(self.input_folder, 'sRGB')
-        
+
         depth_list = os.path.join(self.input_folder, 'depth')
 
         color_paths, depth_paths = [], []

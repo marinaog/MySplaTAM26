@@ -134,7 +134,8 @@ class GradSLAMDataset(torch.utils.data.Dataset):
         self.cy = config_dict["camera_params"]["cy"]
 
         self.dtype = dtype
-        self.raw = config_dict.get('raw')
+        if not hasattr(self, 'raw'):
+            self.raw = config_dict.get('raw', False)
 
         self.desired_height = desired_height
         self.desired_width = desired_width
@@ -248,7 +249,7 @@ class GradSLAMDataset(torch.utils.data.Dataset):
             - Output: :math:`(H, W, 1)` if `self.channels_first == False`, else :math:`(1, H, W)`.
         """
         depth = cv2.resize(
-            (depth if self.raw else depth.astype(float)),
+            (depth.astype(float)),
             (self.desired_width, self.desired_height),
             interpolation=cv2.INTER_NEAREST,
         )
@@ -298,6 +299,9 @@ class GradSLAMDataset(torch.utils.data.Dataset):
         color_path = self.color_paths[index]
         depth_path = self.depth_paths[index]
         color = cv2.imread(color_path, cv2.IMREAD_UNCHANGED)
+        if self.raw:
+            if color.dtype != np.uint16:
+                raise ValueError(f"Expected uint16 for raw data, got {color.dtype}")
         color = cv2.cvtColor(color, cv2.COLOR_BGR2RGB)
         color = np.asarray(color, dtype=float)
         color = self._preprocess_color(color)

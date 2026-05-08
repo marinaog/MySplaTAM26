@@ -252,7 +252,7 @@ def plot_rgbd_silhouette(color, depth, rastered_color, rastered_depth, presence_
 
 def report_progress(params, data, i, progress_bar, iter_time_idx, sil_thres, every_i=1, qual_every_i=1,
                     tracking=False, mapping=False, wandb_run=None, wandb_step=None, wandb_save_qual=False, online_time_idx=None,
-                    global_logging=True, variables=None):
+                    global_logging=True, variables=None, raw=False):
     if i % every_i == 0 or i == 1:
         if wandb_run is not None:
             if tracking:
@@ -290,9 +290,23 @@ def report_progress(params, data, i, progress_bar, iter_time_idx, sil_thres, eve
 
         im, _, _, = Renderer(raster_settings=data['cam'])(**rendervar)
         if tracking:
-            psnr = calc_psnr(im * presence_sil_mask, data['im'] * presence_sil_mask).mean()
+            weighted_im = im * presence_sil_mask
+            weighted_gt_im = data['im'] * presence_sil_mask
         else:
-            psnr = calc_psnr(im, data['im']).mean()
+            weighted_im = im
+            weighted_gt_im = data['im']
+        psnr_raw = calc_psnr(weighted_im, weighted_gt_im).mean()
+        if raw:
+            bright_factor = 0.98 / (torch.quantile(weighted_gt_im, 0.99) + 1e-6)
+            ldr_im = raw2normal(weighted_im, is_torch=True, bright_factor=bright_factor)
+            ldr_gt = raw2normal(weighted_gt_im, is_torch=True, bright_factor=bright_factor)
+            psnr = calc_psnr(ldr_im, ldr_gt).mean()
+            plot_im = raw2normal(im, is_torch=True, bright_factor=bright_factor)
+            plot_gt = raw2normal(data['im'], is_torch=True, bright_factor=bright_factor)
+        else:
+            psnr = psnr_raw
+            plot_im = im
+            plot_gt = data['im']
 
         if tracking:
             diff_depth_rmse = torch.sqrt((((rastered_depth - data['depth']) * presence_sil_mask) ** 2))
@@ -324,6 +338,8 @@ def report_progress(params, data, i, progress_bar, iter_time_idx, sil_thres, eve
                          f"{stage}/Depth RMSE": rmse,
                          f"{stage}/Depth L1": depth_l1,
                          f"{stage}/step": wandb_step}
+            if raw:
+                wandb_log[f"{stage}/PSNR HDR"] = psnr_raw
             if tracking:
                 wandb_log = {**wandb_log, **tracking_log}
             wandb_run.log(wandb_log)
@@ -337,7 +353,7 @@ def report_progress(params, data, i, progress_bar, iter_time_idx, sil_thres, eve
                 fig_title = f"Time-Step: {iter_time_idx} | Iter: {i} | Frame: {data['id']}"
             else:
                 fig_title = f"Time-Step: {online_time_idx} | Iter: {i} | Frame: {data['id']}"
-            plot_rgbd_silhouette(data['im'], data['depth'], im, rastered_depth, presence_sil_mask, diff_depth_l1,
+            plot_rgbd_silhouette(plot_gt, data['depth'], plot_im, rastered_depth, presence_sil_mask, diff_depth_l1,
                                  psnr, depth_l1, fig_title, wandb_run=wandb_run, wandb_step=wandb_step,
                                  wandb_title=f"{stage} Qual Viz")
 
@@ -408,6 +424,8 @@ def eval_online(dataset, all_params, num_frames, eval_online_dir, sil_thres,
             ldr_im = raw2normal(weighted_im, is_torch=True, bright_factor=bright_factor)
             ldr_gt = raw2normal(weighted_gt_im, is_torch=True, bright_factor=bright_factor)
             psnr = calc_psnr(ldr_im, ldr_gt).mean()
+            im = raw2normal(im, is_torch=True, bright_factor=bright_factor)
+            color = raw2normal(color, is_torch=True, bright_factor=bright_factor)
         else:
             psnr = psnr_hdr
 
@@ -582,6 +600,8 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
             ldr_im = raw2normal(weighted_im, is_torch=True, bright_factor=bright_factor)
             ldr_gt = raw2normal(weighted_gt_im, is_torch=True, bright_factor=bright_factor)
             psnr = calc_psnr(ldr_im, ldr_gt).mean()
+            im = raw2normal(im, is_torch=True, bright_factor=bright_factor)
+            color = raw2normal(color, is_torch=True, bright_factor=bright_factor)
             ssim = ms_ssim(ldr_im.unsqueeze(0).cpu(), ldr_gt.unsqueeze(0).cpu(),
                             data_range=1.0, size_average=True)
             lpips_score = loss_fn_alex(torch.clamp(ldr_im.unsqueeze(0), 0.0, 1.0),
@@ -855,7 +875,9 @@ def eval_nvs(dataset, final_params, num_frames, eval_dir, sil_thres,
         if raw:
             # Tonemap to LDR using GT exposure for consistent comparison
             bright_factor = 0.98 / (torch.quantile(weighted_gt_im, 0.99) + 1e-6)
+            im =  raw2normal(im, is_torch=True, bright_factor=bright_factor)
             ldr_im = raw2normal(weighted_im, is_torch=True, bright_factor=bright_factor)
+            color = raw2normal(color, is_torch=True, bright_factor=bright_factor)
             ldr_gt = raw2normal(weighted_gt_im, is_torch=True, bright_factor=bright_factor)
             psnr = calc_psnr(ldr_im, ldr_gt).mean()
             ssim = ms_ssim(ldr_im.unsqueeze(0).cpu(), ldr_gt.unsqueeze(0).cpu(),

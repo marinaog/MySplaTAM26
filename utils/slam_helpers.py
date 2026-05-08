@@ -86,7 +86,7 @@ class TinyColorMLP(nn.Module):
         for linear in self.linears[:-1]:
             out = self.act(linear(out))
 
-        return self.linears[-1](out) + (final_bias if w_bias else 0)
+        return self.final_act(self.linears[-1](out) + (final_bias if w_bias else 0))
 
 
 def l1_loss_v1(x, y):

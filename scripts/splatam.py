@@ -146,7 +146,7 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, gaussian_distribut
     if use_mlp:
         rgb0 = init_pt_cld[:, 3:6].clamp(min=1e-6)  # HDR values ∈ (0, 1]; clamp avoids log(-inf)
         params['features_dc'] = torch.log(rgb0).float()  # log-irradiance bias; exp(features_dc) = initial colour
-        params['features_rest'] = torch.zeros((num_pts, 16), dtype=torch.float, device="cuda")
+        params['features_rest'] = (torch.randn((num_pts, 16), dtype=torch.float, device="cuda") * 0.01)
 
 
     # Initialize a single gaussian trajectory to model the camera poses relative to the first frame
@@ -243,7 +243,7 @@ def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio,
 def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_for_loss,
              sil_thres, use_l1, ignore_outlier_depth_loss, tracking=False,
              mapping=False, do_ba=False, plot_dir=None, visualize_tracking_loss=False, tracking_iteration=None,
-             use_rawnerf_loss=False, rawnerf_eps=1e-3, raw=False):
+             use_rawnerf_loss=False, rawnerf_eps=1e-3, raw=False, tonemap_for_tracking=True):
     # Initialize Loss Dictionary
     losses = {}
 
@@ -303,25 +303,35 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
 
     # Depth loss — always L1 regardless of image loss type; depth is geometric,
     # not photometric, so the rawnerf reweighting does not apply to it.
+    # When rawnerf is active for tracking the image loss uses .mean(), so depth
+    # must also use .mean() — otherwise depth grows as the mask expands and
+    # eventually drowns out the rotational signal from the image loss entirely.
+    # For plain L1 tracking both losses use .sum(), keeping their ratio stable.
     if use_l1 or use_rawnerf_loss:
         mask = mask.detach()
         if tracking:
-            losses['depth'] = torch.abs(curr_data['depth'] - depth)[mask].sum()
+            if use_rawnerf_loss:
+                losses['depth'] = torch.abs(curr_data['depth'] - depth)[mask].mean()
+            else:
+                losses['depth'] = torch.abs(curr_data['depth'] - depth)[mask].sum()
         else:
             losses['depth'] = torch.abs(curr_data['depth'] - depth)[mask].mean()
 
     # RGB Loss
     # Always clamp rendered image to non-negative (physical constraint).
-    im_for_loss = im.clamp(min=0.0)
+    if raw:
+        im_for_loss = torch.clamp(im, max=1.0)
+    else:
+        im_for_loss = im
     gt_for_loss = curr_data['im']
 
-    # When tracking on raw HDR data, apply a pure-power gamma-2.2 tonemap so
-    # the photometric Jacobian has meaningful contrast across the full dynamic
+    # When tracking on raw HDR data, optionally apply a pure-power gamma-2.2 tonemap
+    # so the photometric Jacobian has meaningful contrast across the full dynamic
     # range.  Dark surfaces near zero in linear space map to ~0.1–0.5 in gamma
     # space, giving informative gradients for camera-pose alignment. The (2.2, 0)
     # curve has no linear segment (threshold=0), so it is simply x^(1/2.2).
-    # Mapping is left in linear space where the rawnerf noise-weighting is valid.
-    if tracking and raw:
+    # When tonemap_for_tracking=False, tracking uses raw HDR linear space (same as mapping).
+    if tracking and raw and tonemap_for_tracking:
         _gamma = 1.0 / 2.2
         # Add a small epsilon before pow: d/dx[x^p] = p·x^(p-1) → ∞ as x→0 for p<1.
         # Unrendered pixels (im=0 exactly) would otherwise produce inf gradients
@@ -428,7 +438,7 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution, use_
     if use_mlp:
         rgb0 = new_pt_cld[:, 3:6].clamp(min=1e-6)
         params['features_dc'] = torch.log(rgb0).float()
-        params['features_rest'] = torch.zeros((num_pts, 16), dtype=torch.float, device="cuda")
+        params['features_rest'] = (torch.randn((num_pts, 16), dtype=torch.float, device="cuda") * 0.01)
 
     for k, v in params.items():
         # Check if value is already a torch tensor
@@ -530,6 +540,8 @@ def rgbd_slam(config: dict):
     if "use_rawnerf_loss" not in config['tracking']:
         config['tracking']['use_rawnerf_loss'] = False
         config['tracking']['rawnerf_eps'] = 1e-3
+    if "tonemap_tracking" not in config['tracking']:
+        config['tracking']['tonemap_tracking'] = True
     if "use_rawnerf_loss" not in config['mapping']:
         config['mapping']['use_rawnerf_loss'] = False
         config['mapping']['rawnerf_eps'] = 1e-3
@@ -558,8 +570,8 @@ def rgbd_slam(config: dict):
     device = torch.device(config["primary_device"])
 
     # RAW
-    raw = config.get("raw")
-    use_mlp = config.get('use_mlp')
+    raw = config.get("raw", False)
+    use_mlp = config.get('use_mlp', False)
 
     # Load Dataset
     print("Loading Dataset ...")
@@ -607,7 +619,7 @@ def rgbd_slam(config: dict):
         relative_pose=True,
         ignore_bad=dataset_config["ignore_bad"],
         use_train_split=dataset_config["use_train_split"],
-        raw=config.get("raw")
+        raw=config.get("raw", False)
     )
     num_frames = dataset_config["num_frames"]
     if num_frames == -1:
@@ -792,7 +804,8 @@ def rgbd_slam(config: dict):
                                                    tracking_iteration=iter,
                                                    use_rawnerf_loss=config['tracking']['use_rawnerf_loss'],
                                                    rawnerf_eps=config['tracking']['rawnerf_eps'],
-                                                   raw=raw)
+                                                   raw=raw,
+                                                   tonemap_for_tracking=config['tracking']['tonemap_tracking'])
                 if config['use_wandb']:
                     # Report Loss
                     wandb_tracking_step = report_loss(losses, wandb_run, wandb_tracking_step, tracking=True)
