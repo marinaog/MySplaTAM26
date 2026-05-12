@@ -16,11 +16,20 @@ scene_radius_depth_ratio = 2
 group_name = "rawslam"
 run_name = f"{scene_name}"
 
+use_mlp = False
+raw = False          # Treat images as 16-bit linear HDR (normalised by /65535)
+rawnerf_eps = 1e-3  # ε in the reweighted-L2 RawNeRF loss: 1/(pred + ε)²
+tonemap_tracking = False  # Apply gamma-2.2 tonemap to tracking loss; False → use raw HDR (same as mapping)
+use_rawnerf_loss_tracking=False
+use_rawnerf_loss_mapping=False
+
 config = dict(
     workdir=f"./experiments/{group_name}",
     run_name=run_name,
     seed=seed,
     primary_device=primary_device,
+    raw=raw,
+    use_mlp=use_mlp,
     map_every=map_every, # Mapping every nth frame
     keyframe_every=keyframe_every, # Keyframe every nth frame
     mapping_window_size=mapping_window_size, # Mapping window size
@@ -52,14 +61,18 @@ config = dict(
         end=-1,
         stride=1,
         num_frames=-1,
+        raw=raw,
     ),
     tracking=dict(
         use_gt_poses=False, # Use GT Poses for Tracking
         forward_prop=True, # Forward Propagate Poses
         num_iters=tracking_iters,
+        tonemap_tracking=tonemap_tracking,
         use_sil_for_loss=True,
         sil_thres=0.99,
         use_l1=True,
+        use_rawnerf_loss=use_rawnerf_loss_tracking,
+        rawnerf_eps=rawnerf_eps,
         ignore_outlier_depth_loss=False,
         use_uncertainty_for_loss_mask=False,
         use_uncertainty_for_loss=False,
@@ -83,6 +96,8 @@ config = dict(
         add_new_gaussians=True,
         sil_thres=0.5, # For Addition of new Gaussians
         use_l1=True,
+        use_rawnerf_loss=use_rawnerf_loss_mapping,
+        rawnerf_eps=rawnerf_eps,
         use_sil_for_loss=False,
         ignore_outlier_depth_loss=False,
         use_uncertainty_for_loss_mask=False,
@@ -98,6 +113,15 @@ config = dict(
             unnorm_rotations=0.001,
             logit_opacities=0.05,
             log_scales=0.001,
+            # features_dc is log-irradiance bias: needs a higher LR than normal colour params
+            # because it must travel from 0 → log(scene_colour) ≈ [-7, 0] in early steps.
+            # A step of 0.005 changes rendered colour by ≈ exp(0.005)-1 ≈ 0.5 % (multiplicative).
+            features_dc=0.005,
+            # features_rest are latent codes fed into the MLP; moderate LR keeps inputs in-distribution.
+            features_rest=0.001,
+            # color_mlp weights: conservative — the MLP adds view-dependent residuals on top of
+            # features_dc; we don't want large weight updates to destabilise the DC level.
+            color_mlp=5e-4,
             cam_unnorm_rots=0.0000,
             cam_trans=0.0000,
         ),
