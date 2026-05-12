@@ -206,7 +206,9 @@ def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio,
     w2c = torch.linalg.inv(pose)
 
     # Setup Camera
-    cam = setup_camera(color.shape[2], color.shape[1], intrinsics.cpu().numpy(), w2c.detach().cpu().numpy())
+    alpha_threshold = 1.0 / 65535.0 if use_mlp or raw else 1.0 / 255.0
+    cam = setup_camera(color.shape[2], color.shape[1], intrinsics.cpu().numpy(), w2c.detach().cpu().numpy(),
+                       alpha_threshold=alpha_threshold)
 
     if densify_dataset is not None:
         # Get Densification RGB-D Data & Camera Parameters
@@ -217,7 +219,8 @@ def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio,
             color = color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
         depth = depth.permute(2, 0, 1) # (H, W, C) -> (C, H, W)
         densify_intrinsics = densify_intrinsics[:3, :3]
-        densify_cam = setup_camera(color.shape[2], color.shape[1], densify_intrinsics.cpu().numpy(), w2c.detach().cpu().numpy())
+        densify_cam = setup_camera(color.shape[2], color.shape[1], densify_intrinsics.cpu().numpy(), w2c.detach().cpu().numpy(),
+                                   alpha_threshold=alpha_threshold)
     else:
         densify_intrinsics = intrinsics
 
@@ -318,7 +321,6 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
             losses['depth'] = torch.abs(curr_data['depth'] - depth)[mask].mean()
 
     # RGB Loss
-    # Always clamp rendered image to non-negative (physical constraint).
     if raw:
         im_for_loss = torch.clamp(im, max=1.0)
     else:
@@ -357,7 +359,10 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
         elif tracking:
             losses['im'] = torch.abs(gt_for_loss - im_for_loss).sum()
         else:
-            losses['im'] = 0.8 * l1_loss_v1(im_for_loss, gt_for_loss) + 0.2 * (1.0 - calc_ssim(im_for_loss, gt_for_loss))
+            if raw:
+                losses['im'] = l1_loss_v1(im_for_loss, gt_for_loss)
+            else:
+                losses['im'] = 0.8 * l1_loss_v1(im_for_loss, gt_for_loss) + 0.2 * (1.0 - calc_ssim(im_for_loss, gt_for_loss))
 
     # Visualize the Diff Images
     if tracking and visualize_tracking_loss:
@@ -541,7 +546,7 @@ def rgbd_slam(config: dict):
         config['tracking']['use_rawnerf_loss'] = False
         config['tracking']['rawnerf_eps'] = 1e-3
     if "tonemap_tracking" not in config['tracking']:
-        config['tracking']['tonemap_tracking'] = True
+        config['tracking']['tonemap_tracking'] = False
     if "use_rawnerf_loss" not in config['mapping']:
         config['mapping']['use_rawnerf_loss'] = False
         config['mapping']['rawnerf_eps'] = 1e-3
@@ -678,11 +683,14 @@ def rgbd_slam(config: dict):
         tracking_color, _, tracking_intrinsics, _ = tracking_dataset[0]
         if raw:
             tracking_color = tracking_color.permute(2, 0, 1) / 65535 # (H, W, C) -> (C, H, W)
+            alpha_threshold = 1.0 / 65535.0
         else:
             tracking_color = tracking_color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
+            alpha_threshold = 1.0 / 255.0
         tracking_intrinsics = tracking_intrinsics[:3, :3]
         tracking_cam = setup_camera(tracking_color.shape[2], tracking_color.shape[1],
-                                    tracking_intrinsics.cpu().numpy(), first_frame_w2c.detach().cpu().numpy())
+                                    tracking_intrinsics.cpu().numpy(), first_frame_w2c.detach().cpu().numpy(),
+                                    alpha_threshold=alpha_threshold)
 
     # Initialize list to keep track of Keyframes
     keyframe_list = []
@@ -979,7 +987,8 @@ def rgbd_slam(config: dict):
                                                 config['mapping']['use_sil_for_loss'], config['mapping']['sil_thres'],
                                                 config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'], mapping=True,
                                                 use_rawnerf_loss=config['mapping']['use_rawnerf_loss'],
-                                                rawnerf_eps=config['mapping']['rawnerf_eps'])
+                                                rawnerf_eps=config['mapping']['rawnerf_eps'],
+                                                raw=raw)
                 if config['use_wandb']:
                     # Report Loss
                     wandb_mapping_step = report_loss(losses, wandb_run, wandb_mapping_step, mapping=True)

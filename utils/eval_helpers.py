@@ -360,7 +360,7 @@ def report_progress(params, data, i, progress_bar, iter_time_idx, sil_thres, eve
 
 def eval_online(dataset, all_params, num_frames, eval_online_dir, sil_thres,
                 mapping_iters, add_new_gaussians, wandb_run=None, wandb_save_qual=False, eval_every=1,
-                raw=False):
+                 variables=None, raw=False):
     print("Evaluating Online Final Parameters...")
     psnr_list = []
     psnr_hdr_list = []   # PSNR in linear HDR space (only populated when raw=True)
@@ -387,7 +387,9 @@ def eval_online(dataset, all_params, num_frames, eval_online_dir, sil_thres,
             # Process Camera Parameters
             first_frame_w2c = torch.linalg.inv(pose)
             # Setup Camera
-            cam = setup_camera(color.shape[2], color.shape[1], intrinsics.cpu().numpy(), first_frame_w2c.detach().cpu().numpy())
+            alpha_threshold = 1.0 / 65535.0 if raw else 1.0 / 255.0
+            cam = setup_camera(color.shape[2], color.shape[1], intrinsics.cpu().numpy(), first_frame_w2c.detach().cpu().numpy(),
+                               alpha_threshold=alpha_threshold)
 
         # Define current frame data
         curr_data = {'cam': cam, 'im': color, 'depth': depth, 'id': time_idx, 'intrinsics': intrinsics, 'w2c': first_frame_w2c}
@@ -398,7 +400,7 @@ def eval_online(dataset, all_params, num_frames, eval_online_dir, sil_thres,
                                                    camera_grad=False)
 
         # Initialize Render Variables
-        rendervar = transformed_params2rendervar(params, transformed_gaussians)
+        rendervar = transformed_params2rendervar(params, transformed_gaussians, variables=variables)
         depth_sil_rendervar = transformed_params2depthplussilhouette(params, first_frame_w2c,
                                                                      transformed_gaussians)
 
@@ -553,7 +555,9 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
             # Process Camera Parameters
             first_frame_w2c = torch.linalg.inv(pose)
             # Setup Camera
-            cam = setup_camera(color.shape[2], color.shape[1], intrinsics.cpu().numpy(), first_frame_w2c.detach().cpu().numpy())
+            alpha_threshold = 1.0 / 65535.0 if raw else 1.0 / 255.0
+            cam = setup_camera(color.shape[2], color.shape[1], intrinsics.cpu().numpy(), first_frame_w2c.detach().cpu().numpy(),
+                               alpha_threshold=alpha_threshold)
 
         # Skip frames if not eval_every
         if time_idx != 0 and (time_idx+1) % eval_every != 0:
@@ -802,7 +806,9 @@ def eval_nvs(dataset, final_params, num_frames, eval_dir, sil_thres,
             # Process Camera Parameters
             first_frame_w2c = torch.linalg.inv(pose)
             # Setup Camera
-            cam = setup_camera(color.shape[2], color.shape[1], intrinsics.cpu().numpy(), first_frame_w2c.detach().cpu().numpy())
+            alpha_threshold = 1.0 / 65535.0 if raw else 1.0 / 255.0
+            cam = setup_camera(color.shape[2], color.shape[1], intrinsics.cpu().numpy(), first_frame_w2c.detach().cpu().numpy(),
+                               alpha_threshold=alpha_threshold)
             # Skip first train frame eval for NVS
             continue
 
