@@ -246,7 +246,7 @@ def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio,
 def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_for_loss,
              sil_thres, use_l1, ignore_outlier_depth_loss, tracking=False,
              mapping=False, do_ba=False, plot_dir=None, visualize_tracking_loss=False, tracking_iteration=None,
-             use_rawnerf_loss=False, rawnerf_eps=1e-3, raw=False, tonemap_for_tracking=True):
+             use_rawnerf_loss=False, rawnerf_eps=1e-3, raw=False, tonemap=False):
     # Initialize Loss Dictionary
     losses = {}
 
@@ -333,7 +333,7 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     # space, giving informative gradients for camera-pose alignment. The (2.2, 0)
     # curve has no linear segment (threshold=0), so it is simply x^(1/2.2).
     # When tonemap_for_tracking=False, tracking uses raw HDR linear space (same as mapping).
-    if tracking and raw and tonemap_for_tracking:
+    if tracking and raw and tonemap:
         _gamma = 1.0 / 2.2
         # Add a small epsilon before pow: d/dx[x^p] = p·x^(p-1) → ∞ as x→0 for p<1.
         # Unrendered pixels (im=0 exactly) would otherwise produce inf gradients
@@ -542,11 +542,13 @@ def rgbd_slam(config: dict):
         config['tracking']['visualize_tracking_loss'] = False
     if "gaussian_distribution" not in config:
         config['gaussian_distribution'] = "isotropic"
+    if "tonemap_tracking" not in config['tracking']:
+        config['tracking']['tonemap_tracking'] = False
+    if "tonemap_mapping" not in config['mapping']:
+        config['mapping']['tonemap_mapping'] = False
     if "use_rawnerf_loss" not in config['tracking']:
         config['tracking']['use_rawnerf_loss'] = False
         config['tracking']['rawnerf_eps'] = 1e-3
-    if "tonemap_tracking" not in config['tracking']:
-        config['tracking']['tonemap_tracking'] = False
     if "use_rawnerf_loss" not in config['mapping']:
         config['mapping']['use_rawnerf_loss'] = False
         config['mapping']['rawnerf_eps'] = 1e-3
@@ -718,6 +720,9 @@ def rgbd_slam(config: dict):
         variables['means2D_gradient_accum'] = torch.zeros(params['means3D'].shape[0]).cuda().float()
         variables['denom'] = torch.zeros(params['means3D'].shape[0]).cuda().float()
         variables['timestep'] = torch.zeros(params['means3D'].shape[0]).cuda().float()
+        if use_mlp and 'color_mlp' in variables:
+            mlp_ckpt_path = os.path.join(config['workdir'], config['run_name'], f"mlp{checkpoint_time_idx}.pt")
+            variables['color_mlp'].load_state_dict(torch.load(mlp_ckpt_path))
         # Load the keyframe time idx list
         keyframe_time_indices = np.load(os.path.join(config['workdir'], config['run_name'], f"keyframe_time_indices{checkpoint_time_idx}.npy"))
         keyframe_time_indices = keyframe_time_indices.tolist()
@@ -813,12 +818,15 @@ def rgbd_slam(config: dict):
                                                    use_rawnerf_loss=config['tracking']['use_rawnerf_loss'],
                                                    rawnerf_eps=config['tracking']['rawnerf_eps'],
                                                    raw=raw,
-                                                   tonemap_for_tracking=config['tracking']['tonemap_tracking'])
+                                                   tonemap=config['tracking']['tonemap_tracking'])
                 if config['use_wandb']:
                     # Report Loss
                     wandb_tracking_step = report_loss(losses, wandb_run, wandb_tracking_step, tracking=True)
                 # Backprop
                 loss.backward()
+                if config['tracking'].get('max_grad_norm', None):
+                    all_params = [p for g in optimizer.param_groups for p in g['params']]
+                    torch.nn.utils.clip_grad_norm_(all_params, config['tracking']['max_grad_norm'])
                 # Optimizer Update
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
@@ -905,7 +913,7 @@ def rgbd_slam(config: dict):
                 progress_bar.close()
             except:
                 ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
-                save_params_ckpt(params, ckpt_output_dir, time_idx)
+                save_params_ckpt(params, ckpt_output_dir, time_idx, variables=variables)
                 print('Failed to evaluate trajectory.')
 
         # Densification & KeyFrame-based Mapping
@@ -988,12 +996,16 @@ def rgbd_slam(config: dict):
                                                 config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'], mapping=True,
                                                 use_rawnerf_loss=config['mapping']['use_rawnerf_loss'],
                                                 rawnerf_eps=config['mapping']['rawnerf_eps'],
-                                                raw=raw)
+                                                raw=raw,
+                                                tonemap=config['mapping']['tonemap_mapping'])
                 if config['use_wandb']:
                     # Report Loss
                     wandb_mapping_step = report_loss(losses, wandb_run, wandb_mapping_step, mapping=True)
                 # Backprop
                 loss.backward()
+                if config['mapping'].get('max_grad_norm', None):
+                    all_params = [p for g in optimizer.param_groups for p in g['params']]
+                    torch.nn.utils.clip_grad_norm_(all_params, config['mapping']['max_grad_norm'])
                 with torch.no_grad():
                     # Prune Gaussians
                     if config['mapping']['prune_gaussians']:
@@ -1047,7 +1059,7 @@ def rgbd_slam(config: dict):
                     progress_bar.close()
                 except:
                     ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
-                    save_params_ckpt(params, ckpt_output_dir, time_idx)
+                    save_params_ckpt(params, ckpt_output_dir, time_idx, variables=variables)
                     print('Failed to evaluate trajectory.')
 
         # Add frame to keyframe list
@@ -1069,7 +1081,7 @@ def rgbd_slam(config: dict):
         # Checkpoint every iteration
         if time_idx % config["checkpoint_interval"] == 0 and config['save_checkpoints']:
             ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
-            save_params_ckpt(params, ckpt_output_dir, time_idx)
+            save_params_ckpt(params, ckpt_output_dir, time_idx, variables=variables)
             np.save(os.path.join(ckpt_output_dir, f"keyframe_time_indices{time_idx}.npy"), np.array(keyframe_time_indices))
 
         # Increment WandB Time Step
@@ -1125,7 +1137,7 @@ def rgbd_slam(config: dict):
     params['keyframe_time_indices'] = np.array(keyframe_time_indices)
 
     # Save Parameters
-    save_params(params, output_dir)
+    save_params(params, output_dir, variables=variables)
 
     # Close WandB Run
     if config['use_wandb']:
