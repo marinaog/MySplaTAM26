@@ -108,7 +108,7 @@ config = dict(
         use_uncertainty_for_loss=False,
         use_chamfer=False,
         loss_weights=dict(
-            im=2.0,
+            im=0.5,
             depth=1.0,
         ),
         lrs=dict(

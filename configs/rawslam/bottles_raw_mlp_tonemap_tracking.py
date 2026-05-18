@@ -4,7 +4,7 @@ from os.path import join as p_join
 primary_device = "cuda:0"
 
 seed = int(0)
-scene_name = "candles"
+scene_name = "bottles"
 
 map_every = 1
 keyframe_every = 5
@@ -19,6 +19,10 @@ run_name = f"{scene_name}_raw"
 use_mlp = True
 raw = True          # Treat images as 16-bit linear HDR (normalised by /65535)
 rawnerf_eps = 1e-3  # ε in the reweighted-L2 RawNeRF loss: 1/(pred + ε)²
+tonemap_tracking = True  # Apply gamma-2.2 tonemap to tracking loss; False → use raw HDR (same as mapping)
+tonemap_mapping = False
+use_rawnerf_loss_tracking=False
+use_rawnerf_loss_mapping=False
 
 config = dict(
     workdir=f"./experiments/{group_name}",
@@ -64,15 +68,16 @@ config = dict(
         use_gt_poses=False, # Use GT Poses for Tracking
         forward_prop=True, # Forward Propagate Poses
         num_iters=tracking_iters,
+        tonemap_tracking=tonemap_tracking,
         use_sil_for_loss=True,
         sil_thres=0.99,
         use_l1=True,
+        use_rawnerf_loss=use_rawnerf_loss_tracking,
         rawnerf_eps=rawnerf_eps,
         ignore_outlier_depth_loss=False,
         use_uncertainty_for_loss_mask=False,
         use_uncertainty_for_loss=False,
         use_chamfer=False,
-        max_grad_norm=1.0,
         loss_weights=dict(
             im=0.5,
             depth=1.0,
@@ -93,18 +98,19 @@ config = dict(
     ),
     mapping=dict(
         num_iters=mapping_iters,
+        tonemap_mapping=tonemap_mapping,
         add_new_gaussians=True,
         sil_thres=0.5, # For Addition of new Gaussians
         use_l1=True,
+        use_rawnerf_loss=use_rawnerf_loss_mapping,
         rawnerf_eps=rawnerf_eps,
         use_sil_for_loss=False,
         ignore_outlier_depth_loss=False,
         use_uncertainty_for_loss_mask=False,
         use_uncertainty_for_loss=False,
         use_chamfer=False,
-        max_grad_norm=1.0,
         loss_weights=dict(
-            im=2.0,
+            im=1.66,
             depth=1.0,
         ),
         lrs=dict(
