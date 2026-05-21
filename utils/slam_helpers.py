@@ -241,6 +241,9 @@ def transformed_params2rendervar(params, transformed_gaussians, variables=None, 
         means_for_dirs = transformed_gaussians['means3D'].detach() if tracking else transformed_gaussians['means3D']
         view_dirs = torch.nn.functional.normalize(means_for_dirs, dim=-1)
         colors_precomp = variables['color_mlp']((params['features_dc'], params['features_rest']), view_dirs)
+    elif variables is not None and 'log_rgb' in params:
+        colors_precomp = torch.exp(params['log_rgb'])
+
     else:
         colors_precomp = params['rgb_colors']
 

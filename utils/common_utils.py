@@ -18,7 +18,7 @@ def seed_everything(seed=42):
     """
         Set the `seed` value for torch and numpy seeds. Also turns on
         deterministic execution for cudnn.
-        
+
         Parameters:
         - seed:     A hashable seed value
     """
@@ -41,7 +41,7 @@ def params2cpu(params):
     return res
 
 
-def save_params(output_params, output_dir):
+def save_params(output_params, output_dir, variables=None):
     # Convert to CPU Numpy Arrays
     to_save = params2cpu(output_params)
     # Save the Parameters containing the Gaussian Trajectories
@@ -49,9 +49,12 @@ def save_params(output_params, output_dir):
     print(f"Saving parameters to: {output_dir}")
     save_path = os.path.join(output_dir, "params.npz")
     np.savez(save_path, **to_save)
+    if variables is not None and 'color_mlp' in variables:
+        torch.save(variables['color_mlp'].state_dict(),
+                   os.path.join(output_dir, "mlp.pt"))
 
 
-def save_params_ckpt(output_params, output_dir, time_idx):
+def save_params_ckpt(output_params, output_dir, time_idx, variables=None):
     # Convert to CPU Numpy Arrays
     to_save = params2cpu(output_params)
     # Save the Parameters containing the Gaussian Trajectories
@@ -59,6 +62,9 @@ def save_params_ckpt(output_params, output_dir, time_idx):
     print(f"Saving parameters to: {output_dir}")
     save_path = os.path.join(output_dir, "params"+str(time_idx)+".npz")
     np.savez(save_path, **to_save)
+    if variables is not None and 'color_mlp' in variables:
+        torch.save(variables['color_mlp'].state_dict(),
+                   os.path.join(output_dir, f"mlp{time_idx}.pt"))
 
 
 def save_seq_params(all_params, output_dir):
