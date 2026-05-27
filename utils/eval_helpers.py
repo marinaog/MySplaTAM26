@@ -113,7 +113,7 @@ def evaluate_ate(gt_traj, est_traj):
 
     avg_trans_error = trans_error.mean()
 
-    return avg_trans_error
+    return avg_trans_error, trans_error
 
 
 def compute_tracking_trajectory_metrics(params, iter_gt_w2c_list, iter_time_idx):
@@ -153,7 +153,8 @@ def compute_tracking_trajectory_metrics(params, iter_gt_w2c_list, iter_time_idx)
     else:
         rel_pt_error = torch.zeros(1).float()
 
-    ate_rmse = np.round(evaluate_ate(valid_gt_w2c_list, latest_est_w2c_list), decimals=6)
+    ate_rmse, _ = evaluate_ate(valid_gt_w2c_list, latest_est_w2c_list)
+    ate_rmse = np.round(ate_rmse, decimals=6)
 
     return iter_pt_error, rel_pt_error, ate_rmse
 
@@ -519,7 +520,7 @@ def eval_online(dataset, all_params, num_frames, eval_online_dir, sil_thres,
 
 def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
          mapping_iters, add_new_gaussians, wandb_run=None, wandb_save_qual=False, eval_every=1, save_frames=False,
-         raw=False, variables=None):
+         raw=False, variables=None, save_plots=True, save_metrics_frames=True):
     print("Evaluating Final Parameters ...")
     psnr_list = []
     psnr_hdr_list = []   # PSNR in linear HDR space (only populated when raw=True)
@@ -527,6 +528,7 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
     l1_list = []
     lpips_list = []
     ssim_list = []
+    frame_indices = []
     plot_dir = os.path.join(eval_dir, "plots")
     os.makedirs(plot_dir, exist_ok=True)
     if save_frames:
@@ -621,6 +623,7 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
         psnr_list.append(psnr.cpu().numpy())
         ssim_list.append(ssim.cpu().numpy())
         lpips_list.append(lpips_score)
+        frame_indices.append(time_idx)
 
         # Compute Depth RMSE
         if mapping_iters==0 and not add_new_gaussians:
@@ -665,16 +668,17 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
         fig_title = "Time Step: {}".format(time_idx)
         plot_name = "%04d" % time_idx
         presence_sil_mask = presence_sil_mask.detach().cpu().numpy()
-        if wandb_run is None:
-            plot_rgbd_silhouette(color, depth, im, rastered_depth_viz, presence_sil_mask, diff_depth_l1,
-                                 psnr, depth_l1, fig_title, plot_dir,
-                                 plot_name=plot_name, save_plot=True)
-        elif wandb_save_qual:
-            plot_rgbd_silhouette(color, depth, im, rastered_depth_viz, presence_sil_mask, diff_depth_l1,
-                                 psnr, depth_l1, fig_title, plot_dir,
-                                 plot_name=plot_name, save_plot=True,
-                                 wandb_run=wandb_run, wandb_step=None,
-                                 wandb_title="Eval/Qual Viz")
+        if save_plots:
+            if wandb_run is None:
+                plot_rgbd_silhouette(color, depth, im, rastered_depth_viz, presence_sil_mask, diff_depth_l1,
+                                     psnr, depth_l1, fig_title, plot_dir,
+                                     plot_name=plot_name, save_plot=True)
+            elif wandb_save_qual:
+                plot_rgbd_silhouette(color, depth, im, rastered_depth_viz, presence_sil_mask, diff_depth_l1,
+                                     psnr, depth_l1, fig_title, plot_dir,
+                                     plot_name=plot_name, save_plot=True,
+                                     wandb_run=wandb_run, wandb_step=None,
+                                     wandb_title="Eval/Qual Viz")
 
     try:
         # Compute the final ATE RMSE
@@ -699,7 +703,7 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
             valid_gt_w2c_list.append(gt_w2c_list[idx])
         gt_w2c_list = valid_gt_w2c_list
         # Calculate ATE RMSE
-        ate_rmse = evaluate_ate(gt_w2c_list, latest_est_w2c_list)
+        ate_rmse, _ = evaluate_ate(gt_w2c_list, latest_est_w2c_list)
         print("Final Average ATE RMSE: {:.2f} cm".format(ate_rmse*100))
         if wandb_run is not None:
             wandb_run.log({"Final Stats/Avg ATE RMSE": ate_rmse,
@@ -752,21 +756,47 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
     np.savetxt(os.path.join(eval_dir, "lpips.txt"), lpips_list)
     np.savetxt(os.path.join(eval_dir, "ATE_RMSE.txt"), np.array([ate_rmse]))
 
+    if save_metrics_frames:
+        frame_indices_arr = np.array(frame_indices)
+        np.savetxt(os.path.join(eval_dir, "psnr_per_frames.txt"),
+                   np.column_stack([frame_indices_arr, psnr_list]), fmt="%d %.6f")
+        if raw:
+            np.savetxt(os.path.join(eval_dir, "psnr_hdr_per_frames.txt"),
+                       np.column_stack([frame_indices_arr, psnr_hdr_list]), fmt="%d %.6f")
+        np.savetxt(os.path.join(eval_dir, "ssim_per_frames.txt"),
+                   np.column_stack([frame_indices_arr, ssim_list]), fmt="%d %.6f")
+        np.savetxt(os.path.join(eval_dir, "lpips_per_frames.txt"),
+                   np.column_stack([frame_indices_arr, lpips_list]), fmt="%d %.6f")
+
+    # Save human-readable summary
+    with open(os.path.join(eval_dir, "final_metrics.txt"), "w") as f:
+        f.write("Final Average ATE RMSE: {:.2f} cm\n".format(ate_rmse * 100))
+        if raw:
+            f.write("Average PSNR (HDR linear): {:.2f}\n".format(avg_psnr_hdr))
+            f.write("Average PSNR (LDR tonemapped): {:.2f}\n".format(avg_psnr))
+        else:
+            f.write("Average PSNR: {:.2f}\n".format(avg_psnr))
+        f.write("Average Depth RMSE: {:.2f} cm\n".format(avg_rmse * 100))
+        f.write("Average Depth L1: {:.2f} cm\n".format(avg_l1 * 100))
+        f.write("Average MS-SSIM: {:.3f}\n".format(avg_ssim))
+        f.write("Average LPIPS: {:.3f}\n".format(avg_lpips))
+
     # Plot PSNR & L1 as line plots
-    fig, axs = plt.subplots(1, 2, figsize=(12, 4))
-    axs[0].plot(np.arange(len(psnr_list)), psnr_list)
-    axs[0].set_title("RGB PSNR")
-    axs[0].set_xlabel("Time Step")
-    axs[0].set_ylabel("PSNR")
-    axs[1].plot(np.arange(len(l1_list)), l1_list*100)
-    axs[1].set_title("Depth L1")
-    axs[1].set_xlabel("Time Step")
-    axs[1].set_ylabel("L1 (cm)")
-    fig.suptitle("Average PSNR: {:.2f}, Average Depth L1: {:.2f} cm, ATE RMSE: {:.2f} cm".format(avg_psnr, avg_l1*100, ate_rmse*100), y=1.05, fontsize=16)
-    plt.savefig(os.path.join(eval_dir, "metrics.png"), bbox_inches='tight')
-    if wandb_run is not None:
-        wandb_run.log({"Eval/Metrics": fig})
-    plt.close()
+    if save_plots:
+        fig, axs = plt.subplots(1, 2, figsize=(12, 4))
+        axs[0].plot(np.arange(len(psnr_list)), psnr_list)
+        axs[0].set_title("RGB PSNR")
+        axs[0].set_xlabel("Time Step")
+        axs[0].set_ylabel("PSNR")
+        axs[1].plot(np.arange(len(l1_list)), l1_list*100)
+        axs[1].set_title("Depth L1")
+        axs[1].set_xlabel("Time Step")
+        axs[1].set_ylabel("L1 (cm)")
+        fig.suptitle("Average PSNR: {:.2f}, Average Depth L1: {:.2f} cm, ATE RMSE: {:.2f} cm".format(avg_psnr, avg_l1*100, ate_rmse*100), y=1.05, fontsize=16)
+        plt.savefig(os.path.join(eval_dir, "metrics.png"), bbox_inches='tight')
+        if wandb_run is not None:
+            wandb_run.log({"Eval/Metrics": fig})
+        plt.close()
 
 
 def eval_nvs(dataset, final_params, num_frames, eval_dir, sil_thres,
