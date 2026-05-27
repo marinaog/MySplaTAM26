@@ -4,7 +4,7 @@ from os.path import join as p_join
 primary_device = "cuda:0"
 
 seed = int(0)
-scene_name = "coat_rack"
+scene_name = "kitchen"
 
 map_every = 1
 keyframe_every = 5

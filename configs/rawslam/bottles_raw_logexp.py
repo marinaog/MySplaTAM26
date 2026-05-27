@@ -4,7 +4,7 @@ from os.path import join as p_join
 primary_device = "cuda:0"
 
 seed = int(0)
-scene_name = "coat_rack"
+scene_name = "bottles"
 
 map_every = 1
 keyframe_every = 5
@@ -14,13 +14,21 @@ mapping_iters = 15
 scene_radius_depth_ratio = 2
 
 group_name = "rawslam"
-run_name = f"{scene_name}"
+run_name = f"{scene_name}_raw_logexp"
+
+use_mlp = False
+use_logexp = True
+raw = True          # Treat images as 16-bit linear HDR (normalised by /65535)
+rawnerf_eps = 1e-3  # ε in the reweighted-L2 RawNeRF loss: 1/(pred + ε)²
 
 config = dict(
     workdir=f"./experiments/{group_name}",
     run_name=run_name,
     seed=seed,
     primary_device=primary_device,
+    raw=raw,
+    use_mlp=use_mlp,
+	use_logexp=use_logexp,
     map_every=map_every, # Mapping every nth frame
     keyframe_every=keyframe_every, # Keyframe every nth frame
     mapping_window_size=mapping_window_size, # Mapping window size
@@ -31,9 +39,9 @@ config = dict(
     gaussian_distribution="isotropic", # ["isotropic", "anisotropic"] (Isotropic -> Spherical Covariance, Anisotropic -> Ellipsoidal Covariance)
     report_iter_progress=False,
     load_checkpoint=False,
-    checkpoint_time_idx=400,
+    checkpoint_time_idx=800,
     save_checkpoints=True, # Save Checkpoints
-    checkpoint_interval=100, # Checkpoint Interval
+    checkpoint_interval=400, # Checkpoint Interval
     use_wandb=True,
     wandb=dict(
         project="SplaTAM",
@@ -52,6 +60,7 @@ config = dict(
         end=-1,
         stride=1,
         num_frames=-1,
+        raw=raw,
     ),
     tracking=dict(
         use_gt_poses=False, # Use GT Poses for Tracking
@@ -60,10 +69,12 @@ config = dict(
         use_sil_for_loss=True,
         sil_thres=0.99,
         use_l1=True,
-        ignore_outlier_depth_loss=False,
+        rawnerf_eps=rawnerf_eps,
+        ignore_outlier_depth_loss=True,
         use_uncertainty_for_loss_mask=False,
         use_uncertainty_for_loss=False,
         use_chamfer=False,
+        #max_grad_norm=1.0,
         loss_weights=dict(
             im=0.5,
             depth=1.0,
@@ -74,6 +85,10 @@ config = dict(
             unnorm_rotations=0.0,
             logit_opacities=0.0,
             log_scales=0.0,
+            # MLP params frozen during tracking — only camera pose is optimised
+            features_dc=0.0,
+            features_rest=0.0,
+            color_mlp=0.0,
             cam_unnorm_rots=0.002,
             cam_trans=0.002,
         ),
@@ -83,13 +98,15 @@ config = dict(
         add_new_gaussians=True,
         sil_thres=0.5, # For Addition of new Gaussians
         use_l1=True,
+        rawnerf_eps=rawnerf_eps,
         use_sil_for_loss=False,
-        ignore_outlier_depth_loss=False,
+        ignore_outlier_depth_loss=True,
         use_uncertainty_for_loss_mask=False,
         use_uncertainty_for_loss=False,
         use_chamfer=False,
+        #max_grad_norm=1.0,
         loss_weights=dict(
-            im=0.5,
+            im=1.66,
             depth=1.0,
         ),
         lrs=dict(

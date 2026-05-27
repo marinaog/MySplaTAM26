@@ -4,7 +4,7 @@ from os.path import join as p_join
 primary_device = "cuda:0"
 
 seed = int(0)
-scene_name = "candles"
+scene_name = "nerdy_robot"
 
 map_every = 1
 keyframe_every = 5
@@ -31,8 +31,8 @@ config = dict(
     gaussian_distribution="isotropic", # ["isotropic", "anisotropic"] (Isotropic -> Spherical Covariance, Anisotropic -> Ellipsoidal Covariance)
     report_iter_progress=False,
     load_checkpoint=False,
-    checkpoint_time_idx=0,
-    save_checkpoints=False, # Save Checkpoints
+    checkpoint_time_idx=400,
+    save_checkpoints=True, # Save Checkpoints
     checkpoint_interval=100, # Checkpoint Interval
     use_wandb=True,
     wandb=dict(
