@@ -5,7 +5,7 @@ import subprocess
 num_runs = 1
 args = []
 for run_num in range(num_runs):
-    for scene in ["candles"]:
+    for scene in ["kitchen", "coat_rack", "nerdy_robot"]:
         script_args = [f"configs/rawslam/{scene}_srgb_l1.py"]
         log_file = f"prints/{scene}_raw_logexp{run_num}"
         args.append((script_args, log_file))

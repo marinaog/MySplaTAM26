@@ -6,24 +6,31 @@ num_runs = 1
 args = []
 for run_num in range(num_runs):
     for scene in [
-        "bottles_4",
-        "boxes",
-        "boxes_logexp_3",
-        "cabin",
-        "cabin_raw_logexp_3",
-        "candles",
-        "candles_raw_logexp_2",
-        "christmas_3",
-        "christmas_raw_logexp",
-        "coat_rack",
-        "coat_rack_raw_logexp",
+        #"bottles_5",
+        #"bottles_6",
+        #"bottles",
+        "bottles_raw_logexp_3",
+        #"boxes_5",
+        #"boxes",
+        #"boxes_raw_logexp_2",
+        ##"cabin_2",
+        #"cabin",
+        #"cabin_raw_logexp_2",
+        ##"candles_raw_logexp_2",
+        ##"christmas_4",
+        #"christmas",
+        #"christmas_raw_logexp_3",
+        #"coat_rack_3",
+        #"coat_rack_2",
+        #"coat_rack_raw_logexp",
+        #"kitchen_3",
         "kitchen",
-        "kitchen_logexp",
-        "nerdy_robot",
-        "nerdy_robot_logexp_2",
-        "small_city",
-        "small_city_logexp_2",
-        "coffee_raw_logexp"]:
+        #"kitchen_raw_logexp_5",
+        #"nerdy_robot_3",
+        #"nerdy_robot_logexp_3",
+        #"small_city_logexp_2",
+        #"coffee_raw_logexp"
+        ]:
         script_args = [f"experiments/rawslam/{scene}"]
         log_file = f"prints/eval_{scene}_{run_num}"
         args.append((script_args, log_file))
