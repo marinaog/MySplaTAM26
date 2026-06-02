@@ -106,7 +106,7 @@ config = dict(
         use_chamfer=False,
         #max_grad_norm=1.0,
         loss_weights=dict(
-            im=0.5,
+            im=3.0,
             depth=1.0,
         ),
         lrs=dict(
