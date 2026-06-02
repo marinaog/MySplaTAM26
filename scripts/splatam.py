@@ -137,7 +137,6 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, gaussian_distribut
         raise ValueError(f"Unknown gaussian_distribution {gaussian_distribution}")
     params = {
         'means3D': means3D,
-        'rgb_colors': init_pt_cld[:, 3:6],
         'unnorm_rotations': unnorm_rots,
         'logit_opacities': logit_opacities,
         'log_scales': log_scales,
@@ -145,11 +144,14 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, gaussian_distribut
 
     if use_mlp:
         rgb0 = init_pt_cld[:, 3:6].clamp(min=1e-6)  # HDR values ∈ (0, 1]; clamp avoids log(-inf)
+        params['rgb_colors'] = init_pt_cld[:, 3:6]
         params['features_dc'] = torch.log(rgb0).float()  # log-irradiance bias; exp(features_dc) = initial colour
         params['features_rest'] = (torch.randn((num_pts, 16), dtype=torch.float, device="cuda") * 0.01)
     elif use_logexp:
         rgb0 = init_pt_cld[:, 3:6].clamp(min=1e-6)
         params['log_rgb'] = torch.log(rgb0).float()
+    else:
+        params['rgb_colors'] = init_pt_cld[:, 3:6]
 
     # Initialize a single gaussian trajectory to model the camera poses relative to the first frame
     cam_rots = np.tile([1, 0, 0, 0], (1, 1))
@@ -438,18 +440,20 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution, use_
         raise ValueError(f"Unknown gaussian_distribution {gaussian_distribution}")
     params = {
         'means3D': means3D,
-        'rgb_colors': new_pt_cld[:, 3:6],
         'unnorm_rotations': unnorm_rots,
         'logit_opacities': logit_opacities,
         'log_scales': log_scales,
     }
     if use_mlp:
         rgb0 = new_pt_cld[:, 3:6].clamp(min=1e-6)
+        params['rgb_colors'] = new_pt_cld[:, 3:6]
         params['features_dc'] = torch.log(rgb0).float()
         params['features_rest'] = (torch.randn((num_pts, 16), dtype=torch.float, device="cuda") * 0.01)
     elif use_logexp:
         rgb0 = new_pt_cld[:, 3:6].clamp(min=1e-6)
         params['log_rgb'] = torch.log(rgb0).float()
+    else:
+        params['rgb_colors'] = new_pt_cld[:, 3:6]
 
     for k, v in params.items():
         # Check if value is already a torch tensor

@@ -280,7 +280,7 @@ def params2silhouette(params):
     else:
         log_scales = params['log_scales']
     # Initialize Render Variables
-    sil_color = torch.zeros_like(params['rgb_colors'])
+    sil_color = torch.zeros(params['means3D'].shape[0], 3, device='cuda', dtype=torch.float)
     sil_color[:, 0] = 1.0
     rendervar = {
         'means3D': params['means3D'],
@@ -300,7 +300,7 @@ def transformed_params2silhouette(params, transformed_gaussians):
     else:
         log_scales = params['log_scales']
     # Initialize Render Variables
-    sil_color = torch.zeros_like(params['rgb_colors'])
+    sil_color = torch.zeros(params['means3D'].shape[0], 3, device='cuda', dtype=torch.float)
     sil_color[:, 0] = 1.0
     rendervar = {
         'means3D': transformed_gaussians['means3D'],
