@@ -1,7 +1,7 @@
-scene = "bottles"
+scene = "boxes"
 
-hdr_folder = f"experiments/rawslam/{scene}_raw_logexp/eval_rerun"
-ldr_folder = f"experiments/rawslam/{scene}_4/eval_rerun"
+hdr_folder = f"experiments/rawslam/{scene}_raw_logexp_3/eval_rerun"
+ldr_folder = f"experiments/rawslam/{scene}/eval_rerun"
 
 import numpy as np
 import matplotlib.pyplot as plt
